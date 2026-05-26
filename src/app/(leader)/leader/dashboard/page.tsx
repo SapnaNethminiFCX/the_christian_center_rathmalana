@@ -13,9 +13,9 @@ import { useMyCells } from "@/application/hooks/useCells";
 import {
   useCellsWeekly,
   useAttendance,
-  useMeetingTypes,
 } from "@/application/hooks/useAnalytics";
 import { useReportAggregates } from "@/application/hooks/useReportAggregates";
+import { useAppSelector } from "@/application/hooks/useAppSelector";
 
 const TYPE_COLORS: Record<string, string> = {
   care: "#1D4ED8",
@@ -29,69 +29,78 @@ function weekLabel(w: unknown): string {
   return w.length >= 3 ? w.slice(-3) : w;
 }
 
-const KNOWN_CELL_TYPES = new Set(["g12", "care", "children", "outreach"]);
-
-function toMeetingTypeArray(d: unknown): Array<{ type: string; count: number }> {
-  if (Array.isArray(d)) return d as Array<{ type: string; count: number }>;
-  if (d && typeof d === "object") {
-    const obj = d as Record<string, unknown>;
-    if (obj.breakdown && typeof obj.breakdown === "object") {
-      return toMeetingTypeArray(obj.breakdown);
-    }
-    const entries = Object.entries(obj).filter(([k]) => KNOWN_CELL_TYPES.has(k));
-    if (entries.length === 0) return [];
-    return entries.map(([type, count]) => ({
-      type,
-      count: typeof count === "number" ? count : Number(count) || 0,
-    }));
-  }
-  return [];
-}
-
 export default function LeaderDashboardPage() {
   const router = useRouter();
+  // /cells/mine returns every cell the user belongs to (member + led).
+  // The strict filter below narrows it to cells where THIS user is the
+  // leader — strict equality so we never accidentally match cells where
+  // both `currentUid` and `leaderUid` are undefined (which would let every
+  // row through and inflate the KPI).
   const { cells: myCells, loading: cellsLoading } = useMyCells();
+  const currentUid = useAppSelector((s) => s.session.user?.uid);
   const cellsWeekly = useCellsWeekly({ weeks: 8 });
   const attendance = useAttendance();
-  const meetingTypes = useMeetingTypes();
+
+  const myLedCells = useMemo(() => {
+    if (!currentUid) return [];
+    return (myCells ?? []).filter((c) => !!c.leaderUid && c.leaderUid === currentUid);
+  }, [myCells, currentUid]);
+
   // Fallback aggregates derived from real cell reports — used when the
   // backend's /analytics/* endpoints return empty.
-  const aggregates = useReportAggregates(myCells, { weeks: 8 });
+  const aggregates = useReportAggregates(myLedCells, { weeks: 8 });
 
   const totalMembers = useMemo(
-    () => (Array.isArray(myCells) ? myCells : []).reduce((s, c) => s + (c.memberCount ?? 0), 0),
-    [myCells],
+    () => myLedCells.reduce((s, c) => s + (c.memberCount ?? 0), 0),
+    [myLedCells],
   );
 
   // Total reports filed across the leader's cells. `cell.reportCount` is the
   // authoritative source from /cells/mine; the analytics endpoint is used as
   // a fallback if cells haven't loaded yet.
   const totalReports = useMemo(() => {
-    const fromCells = (Array.isArray(myCells) ? myCells : []).reduce((s, c) => s + (c.reportCount ?? 0), 0);
+    const fromCells = myLedCells.reduce((s, c) => s + (c.reportCount ?? 0), 0);
     if (fromCells > 0) return fromCells;
     return (Array.isArray(cellsWeekly.data) ? cellsWeekly.data : []).reduce((s, p) => s + (p?.reports ?? 0), 0);
-  }, [myCells, cellsWeekly.data]);
+  }, [myLedCells, cellsWeekly.data]);
 
   // Prefer backend analytics when populated; fall back to client-side
-  // aggregates computed from real cell reports — both when empty AND when the
-  // API returns zero-only data (backend shipping shape before aggregation).
+  // aggregates computed from real cell reports. If neither produces data
+  // (typical for a leader with cells but no recent attendance recorded),
+  // fall back further to per-cell member counts so the chart is never empty.
   const weeklyBars = useMemo(() => {
     const fromApi = Array.isArray(attendance.data) ? attendance.data : [];
     const apiTotal = fromApi.reduce((s, x) => s + (x?.present ?? 0) + (x?.absent ?? 0), 0);
-    const source = apiTotal > 0 ? fromApi : aggregates.weekly;
-    return source.slice(-8).map((p) => ({ label: weekLabel(p?.week), value: p?.present ?? 0 }));
-  }, [attendance.data, aggregates.weekly]);
-
-  const typeSlices = useMemo(() => {
-    const fromApi = toMeetingTypeArray(meetingTypes.data);
-    const apiTotal = fromApi.reduce((s, x) => s + (x.count ?? 0), 0);
-    const source = apiTotal > 0 ? fromApi : aggregates.meetingTypes;
-    return source.map((s) => ({
-      label: s?.type ?? "unknown",
-      value: s?.count ?? 0,
-      color: TYPE_COLORS[s?.type ?? ""] ?? "#999",
+    if (apiTotal > 0) {
+      return fromApi.slice(-8).map((p) => ({ label: weekLabel(p?.week), value: p?.present ?? 0 }));
+    }
+    const weeklyTotal = aggregates.weekly.reduce((s, p) => s + (p?.present ?? 0), 0);
+    if (weeklyTotal > 0) {
+      return aggregates.weekly.slice(-8).map((p) => ({ label: weekLabel(p?.week), value: p?.present ?? 0 }));
+    }
+    // Per-cell fallback. Truncate names so labels fit the tiny SVG axis.
+    return myLedCells.map((c) => ({
+      label: c.name.length > 10 ? `${c.name.slice(0, 9)}…` : c.name,
+      value: c.memberCount ?? 0,
     }));
-  }, [meetingTypes.data, aggregates.meetingTypes]);
+  }, [attendance.data, aggregates.weekly, myLedCells]);
+
+  // The "By cell type" card is labelled "Distribution of your cells", so it
+  // should count cells, not reports. Counting reports under-represented types
+  // whose cells hadn't filed any report yet (e.g. a leader with 4 cells across
+  // different types but only "children" reports filed would show 1 slice).
+  const typeSlices = useMemo(() => {
+    const typeMap = new Map<string, number>();
+    for (const c of myLedCells) {
+      const t = c.type ?? "unknown";
+      typeMap.set(t, (typeMap.get(t) ?? 0) + 1);
+    }
+    return Array.from(typeMap.entries()).map(([type, count]) => ({
+      label: type,
+      value: count,
+      color: TYPE_COLORS[type] ?? "#999",
+    }));
+  }, [myLedCells]);
 
   return (
     <div className="page">
@@ -110,7 +119,7 @@ export default function LeaderDashboardPage() {
       </header>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14, marginBottom: 20 }}>
-        <KpiMini label="My cells" value={cellsLoading ? "…" : myCells.length} sub="Active cells" />
+        <KpiMini label="My cells" value={cellsLoading ? "…" : myLedCells.length} sub="Active cells" />
         <KpiMini label="Total members" value={cellsLoading ? "…" : totalMembers} sub="Across cells" />
         <KpiMini label="Reports filed" value={cellsLoading ? "…" : totalReports} sub="Across your cells" />
       </div>
@@ -118,7 +127,11 @@ export default function LeaderDashboardPage() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14, marginBottom: 20 }}>
         <ChartCard
           title="Weekly attendance"
-          sub="Members present across all cells over the last 8 weeks"
+          sub={
+            (Array.isArray(attendance.data) && attendance.data.length > 0) || aggregates.weekly.length > 0
+              ? "Members present across all cells over the last 8 weeks"
+              : "Members per cell — file reports to start seeing weekly trends"
+          }
         >
           {(attendance.loading || aggregates.loading) && weeklyBars.length === 0 ? <EmptyChart message="Loading…" /> :
             weeklyBars.length === 0 ? <EmptyChart /> :
@@ -130,7 +143,7 @@ export default function LeaderDashboardPage() {
           sub="Distribution of your cells"
           legend={typeSlices.map((s) => ({ label: s.label, color: s.color }))}
         >
-          {(meetingTypes.loading || aggregates.loading) && typeSlices.length === 0 ? <EmptyChart message="Loading…" /> :
+          {cellsLoading && typeSlices.length === 0 ? <EmptyChart message="Loading…" /> :
             typeSlices.length === 0 ? <EmptyChart /> :
             <div style={{ display: "flex", justifyContent: "center", padding: "8px 0" }}>
               <MeetingTypeDonut slices={typeSlices} size={180} />

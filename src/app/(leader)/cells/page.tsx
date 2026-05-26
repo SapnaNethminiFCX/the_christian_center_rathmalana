@@ -28,37 +28,42 @@ export default function LeaderCellsPage() {
   const [typeFilter, setTypeFilter] = useState<"all" | CellType>("all");
   const [tab, setTab]               = useState<TabId>("mine");
 
-  // GET /cells?state=active&scope=org — the auto-scope for a Leader caller is
-  // "cells you lead" which is too narrow for the "Other cells" tab. Asking
-  // explicitly for `scope=org` tells the backend to return the full active
-  // directory regardless of the caller's role (older backends ignore the
-  // param and still return the auto-scoped set, in which case the Other tab
-  // shows what it can). Archived cells are excluded via state=active.
-  const { cells: activeCells, loading } = useCells({ state: "active", scope: "org" });
+  const isG12 = user?.roles?.includes("g12") ?? false;
 
-  const filtered = useMemo(() => activeCells.filter((c) => {
+  // Per V2 spec §13.1, GET /cells auto-scopes by role:
+  //   - Leader → cells they lead
+  //   - G12    → cells in their network (their cells + cells under them)
+  // We use TWO fetches so the network split is the backend's source of
+  // truth (rather than relying on g12LeaderUid being populated on every row
+  // of an org-wide response):
+  //   1. `scope=mine` (or no scope, since backend auto-applies) → network
+  //   2. `scope=org`  → everything; "Other cells" = org minus network.
+  // For non-G12 leaders we skip the org request — they only need "mine".
+  const network = useCells({ state: "active" });
+  const org = useCells({ state: "active", scope: "org" });
+  const loading = network.loading || (isG12 && org.loading);
+
+  const applyFilters = (list: Cell[]) => list.filter((c) => {
     if (typeFilter !== "all" && c.type !== typeFilter) return false;
     if (search.trim() && !c.name.toLowerCase().includes(search.trim().toLowerCase())) return false;
     return true;
-  }), [activeCells, typeFilter, search]);
-
-  const isG12 = user?.roles?.includes("g12") ?? false;
+  });
 
   // ── Three buckets ────────────────────────────────────────────────────
   // 1. Mine    — cells where the current user is the leader (full access).
-  // 2. UnderMe — G12 only: cells whose g12LeaderUid is the current user
-  //              AND the user is not also the cell's leader. Read-only view
-  //              + reports, clickable through to the cell detail page.
-  // 3. Other   — everything else; visible but dimmed and non-clickable.
-  const myCells: Cell[]      = filtered.filter((c) => c.leaderUid === user?.uid);
+  // 2. UnderMe — G12 only: cells in their network where they are NOT the
+  //              direct leader. Backend network-scope already excludes
+  //              outside cells, so just remove "mine" from `network`.
+  // 3. Other   — org list minus everything in the network.
+  const networkFiltered = useMemo(() => applyFilters(network.cells), [network.cells, typeFilter, search]);
+  const orgFiltered = useMemo(() => applyFilters(org.cells), [org.cells, typeFilter, search]);
+
+  const myCells: Cell[]      = networkFiltered.filter((c) => c.leaderUid === user?.uid);
   const underMeCells: Cell[] = isG12
-    ? filtered.filter((c) => c.g12LeaderUid === user?.uid && c.leaderUid !== user?.uid)
+    ? networkFiltered.filter((c) => c.leaderUid !== user?.uid)
     : [];
-  const otherCells: Cell[]   = filtered.filter((c) => {
-    if (c.leaderUid === user?.uid) return false;
-    if (isG12 && c.g12LeaderUid === user?.uid) return false;
-    return true;
-  });
+  const networkIds = new Set(network.cells.map((c) => c.id));
+  const otherCells: Cell[]   = orgFiltered.filter((c) => !networkIds.has(c.id));
 
   const tabs: CellTab[] = [
     { id: "mine",  label: "Cells I lead", icon: "users",      count: myCells.length },

@@ -34,10 +34,11 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
-import { useCells, type Cell, type CellType } from "@/application/hooks/useCells";
+import { useCells, useCellMutations, type Cell, type CellType } from "@/application/hooks/useCells";
 import { useAppDispatch } from "@/application/hooks/useAppDispatch";
 import { pushToast } from "@/application/slices/uiSlice";
 import { apiRequest, ApiRequestError } from "@/infrastructure/api/request";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 const TYPE_LABEL: Record<CellType, string> = {
   g12: "G12",
@@ -99,6 +100,22 @@ export default function AdminCellDetailPage() {
     open: false,
     kind: "leader",
   });
+
+  // DELETE /cells/:id — admin/super_admin always permitted per V2 spec §13.7.
+  const { deleteCell: deleteCellApi } = useCellMutations();
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDeleteCell = async () => {
+    if (!cell) return;
+    setDeleting(true);
+    const ok = await deleteCellApi(cell.id);
+    setDeleting(false);
+    if (ok) {
+      setDeleteOpen(false);
+      router.push(`${base}/cells`);
+    }
+  };
 
   if (loading && !cell) {
     return (
@@ -245,7 +262,8 @@ export default function AdminCellDetailPage() {
             pointerEvents: "none",
           }}
         />
-        <div style={{ position: "relative" }}>
+        <div style={{ position: "relative", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
             <span className={`cell-type ${cell.type}`}>{TYPE_LABEL[cell.type]}</span>
             {cell.area && (
@@ -268,6 +286,15 @@ export default function AdminCellDetailPage() {
               {cell.id.slice(0, 16)}…
             </span>
           </div>
+          </div>
+          <Button
+            variant="ghost"
+            icon="trash-2"
+            onClick={() => setDeleteOpen(true)}
+            style={{ color: "#fff", background: "rgba(220,38,38,0.18)", borderColor: "rgba(220,38,38,0.4)" }}
+          >
+            Delete cell
+          </Button>
         </div>
       </div>
 
@@ -323,6 +350,16 @@ export default function AdminCellDetailPage() {
         otherG12Cells={otherG12Cells}
         onCancel={() => setTransferDialog({ open: false, kind: "leader" })}
         onConfirm={handleTransfer}
+      />
+
+      <ConfirmDialog
+        open={deleteOpen}
+        title={`Delete ${cell.name}?`}
+        message="This permanently removes the cell, its members, and all its reports. This action cannot be undone."
+        confirmLabel={deleting ? "Deleting…" : "Yes, delete"}
+        destructive
+        onConfirm={handleDeleteCell}
+        onCancel={() => (deleting ? null : setDeleteOpen(false))}
       />
     </div>
   );

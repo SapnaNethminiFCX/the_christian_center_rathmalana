@@ -98,13 +98,36 @@ export function RegisterForm() {
       );
 
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
+        const body = await res.json().catch(() => ({}));
+        // Backend may return either the V2 envelope ({ error: { code, message, details } })
+        // or a flat { field, message } shape — handle both so email validation surfaces
+        // inline under the email field instead of as a generic toast.
+        const apiError = body?.error ?? body;
         if (res.status === 409) {
           setFieldError("email", t("emailExists"));
-        } else if (res.status === 400 && err?.field) {
-          setFieldError(err.field, err.message);
+        } else if (res.status === 400) {
+          const details = apiError?.details;
+          // Map per-field validation errors: { details: { email: ["..."] } }
+          if (details && typeof details === "object") {
+            const fieldMap: Record<string, string> = { email: "email", firstName: "firstName", lastName: "lastName", password: "pw" };
+            let mapped = false;
+            for (const [serverField, formField] of Object.entries(fieldMap)) {
+              const raw = details[serverField];
+              const msg = Array.isArray(raw) ? raw[0] : typeof raw === "string" ? raw : null;
+              if (msg) { setFieldError(formField, msg); mapped = true; }
+            }
+            if (!mapped) setFieldError("email", apiError?.message ?? t("emailInvalid"));
+          } else if (body?.field) {
+            setFieldError(body.field === "password" ? "pw" : body.field, body.message);
+          } else if (apiError?.code === "INVALID_EMAIL" || /email/i.test(apiError?.message ?? "")) {
+            setFieldError("email", apiError?.message ?? t("emailInvalid"));
+          } else {
+            setFieldError("email", apiError?.message ?? t("emailInvalid"));
+          }
         } else {
-          dispatch(pushToast({ tone: "warning", title: t("signUpFailed"), message: err?.message ?? "" }));
+          // Generic non-400/409 failure — surface server message under email
+          // rather than a toast (the user explicitly asked to drop "Sign-up failed").
+          setFieldError("email", apiError?.message ?? t("emailInvalid"));
         }
         return;
       }
@@ -118,7 +141,8 @@ export function RegisterForm() {
       );
       router.push(`/login?email=${encodeURIComponent(email.trim())}`);
     } catch {
-      dispatch(pushToast({ tone: "warning", title: t("signUpFailed"), message: t("networkError") }));
+      // Network-level failure — show under email field, not as a toast.
+      setFieldError("email", t("networkError"));
     } finally {
       setLoading(false);
     }

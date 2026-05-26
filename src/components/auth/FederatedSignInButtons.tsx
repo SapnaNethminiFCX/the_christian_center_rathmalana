@@ -8,11 +8,9 @@ import {
   signInWithCustomToken,
   signOut,
 } from "firebase/auth";
-import { useAppDispatch } from "@/application/hooks/useAppDispatch";
 import { useAppSelector } from "@/application/hooks/useAppSelector";
-import { pushToast } from "@/application/slices/uiSlice";
 import { auth } from "@/infrastructure/firebase/auth";
-import { apiRequest, ApiRequestError } from "@/infrastructure/api/request";
+import { apiRequest } from "@/infrastructure/api/request";
 import { setFederatedSignInInProgress } from "@/infrastructure/auth/federatedSignInState";
 import { GoogleIcon } from "@/components/ui/GoogleIcon";
 import { AppleIcon } from "./AppleIcon";
@@ -47,8 +45,7 @@ interface FederatedExchangeResponse {
  * popup → signOut → exchange dance, so it doesn't call /me against an
  * unprovisioned UID partway through.
  */
-export function FederatedSignInButtons({ context = "signin", disabled }: Props) {
-  const dispatch = useAppDispatch();
+export function FederatedSignInButtons({ disabled }: Props) {
   const preferredLanguage = useAppSelector((s) => s.locale.current);
   const [busy, setBusy] = useState<"google" | "apple" | null>(null);
 
@@ -57,7 +54,6 @@ export function FederatedSignInButtons({ context = "signin", disabled }: Props) 
     setBusy(provider);
 
     const label = provider === "google" ? "Google" : "Apple";
-    const action = context === "signin" ? "sign-in" : "sign-up";
 
     setFederatedSignInInProgress(true);
 
@@ -115,49 +111,10 @@ export function FederatedSignInButtons({ context = "signin", disabled }: Props) 
       // from the popup step.
       await signOut(auth).catch(() => null);
 
+      // Toasts intentionally suppressed (user request). Keep console diagnostics
+      // so developers can still inspect failures in the browser console.
       const code = (err as { code?: string })?.code ?? "unknown";
       console.error(`[FederatedSignIn] ${provider} error:`, code, err);
-
-      // Don't show a toast when the user closed the popup themselves.
-      if (
-        code === "auth/popup-closed-by-user" ||
-        code === "auth/cancelled-popup-request"
-      ) {
-        return;
-      }
-
-      let message = "Something went wrong. Please use email + password instead.";
-      if (code === "auth/operation-not-allowed") {
-        message = `${label} sign-in is not enabled in Firebase Console. Enable it under Authentication → Sign-in method → ${label}.`;
-      } else if (code === "auth/account-exists-with-different-credential") {
-        message = "An account with this email uses a different sign-in method. Sign in that way first.";
-      } else if (code === "auth/network-request-failed") {
-        message = "Network error. Check your connection and try again.";
-      } else if (code === "auth/popup-blocked") {
-        message = "Your browser blocked the sign-in popup. Allow popups for this site and try again.";
-      } else if (code === "auth/unauthorized-domain") {
-        message = "This domain isn't authorized for sign-in. Add it under Firebase → Authentication → Settings → Authorized domains.";
-      } else if (code === "auth/user-disabled") {
-        message = `This ${label} account is disabled. Contact an administrator.`;
-      } else if (code === "auth/invalid-credential" && provider === "apple") {
-        message = "Apple rejected the sign-in. The Services ID, Team ID, Key ID, or private key in Firebase Console may not match the Apple Developer registration.";
-      } else if (err instanceof ApiRequestError) {
-        if (err.status === 401 && err.code === "FEDERATED_TOKEN_INVALID") {
-          message = `${label} rejected the sign-in token. Please try again.`;
-        } else if (err.status === 404) {
-          message = `${label} sign-in is not yet available on the server. Please try again later.`;
-        } else {
-          message = err.message;
-        }
-      }
-
-      dispatch(
-        pushToast({
-          tone: "warning",
-          title: `${label} ${action} failed`,
-          message,
-        }),
-      );
     } finally {
       setBusy(null);
     }

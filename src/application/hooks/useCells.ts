@@ -170,5 +170,46 @@ export function useCellMutations() {
     }
   };
 
-  return { createCell, updateCell, archiveCell };
+  /**
+   * DELETE /cells/:id (V2 spec §13.7). Permanent — caller must be the cell's
+   * leader, its g12 leader, or admin/super_admin. Backend returns 204 on
+   * success, 403 FORBIDDEN, or 404 CELL_NOT_FOUND.
+   */
+  const deleteCell = async (cellId: string): Promise<boolean> => {
+    try {
+      await apiRequest(`/cells/${cellId}`, { method: "DELETE" });
+      dispatch(pushToast({ tone: "success", title: "Cell deleted" }));
+      return true;
+    } catch (err) {
+      let msg = "Failed to delete cell.";
+      if (err instanceof ApiRequestError) {
+        if (err.status === 403) msg = "You don't have permission to delete this cell.";
+        else if (err.status === 404) msg = "Cell not found — it may already be deleted.";
+        else msg = err.message;
+      }
+      dispatch(pushToast({ tone: "warning", title: "Couldn't delete cell", message: msg }));
+      return false;
+    }
+  };
+
+  return { createCell, updateCell, archiveCell, deleteCell };
+}
+
+/**
+ * Permission check matching V2 spec §13.7. Returns true only when the caller
+ * can delete the given cell:
+ *   - the cell's own leader (leaderUid)
+ *   - the cell's g12 leader (g12LeaderUid)
+ *   - any admin / super_admin
+ */
+export function canDeleteCell(
+  cell: { leaderUid?: string; g12LeaderUid?: string } | null | undefined,
+  user: { uid?: string; roles?: string[] } | null | undefined,
+): boolean {
+  if (!cell || !user?.uid) return false;
+  const roles = user.roles ?? [];
+  if (roles.includes("admin") || roles.includes("super_admin")) return true;
+  if (cell.leaderUid && cell.leaderUid === user.uid) return true;
+  if (cell.g12LeaderUid && cell.g12LeaderUid === user.uid) return true;
+  return false;
 }
