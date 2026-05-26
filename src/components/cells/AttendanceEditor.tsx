@@ -64,6 +64,7 @@ export function AttendanceEditor({ attendance, onChange, roleFilter }: Props) {
             else if (Array.isArray(obj.data)) bucket = obj.data;
             else if (Array.isArray(obj.results)) bucket = obj.results;
           }
+          const needle = term.toLowerCase();
           for (const it of bucket) {
             const u = it as Record<string, unknown>;
             const uid = String(u.uid ?? u.id ?? "");
@@ -71,18 +72,29 @@ export function AttendanceEditor({ attendance, onChange, roleFilter }: Props) {
             // Skip admins and anyone already in the attendance list.
             const roles = Array.isArray(u.roles) ? (u.roles as string[]) : [];
             if (roles.includes("admin") || roles.includes("super_admin")) continue;
-            // Defence-in-depth in case the backend ignored ?roles=.
+            // Defence-in-depth in case the backend ignored ?roles=. Every user
+            // holds `member` as a base role, so checking "any overlap" would
+            // let G12s slip through — instead reject any role OUTSIDE the
+            // allow-list. Empty/missing role array is allowed through for
+            // legacy records.
             if (roleFilter && roleFilter.length > 0 && roles.length > 0) {
               const allowed = new Set(roleFilter);
-              if (!roles.some((r) => allowed.has(r))) continue;
+              if (roles.some((r) => !allowed.has(r))) continue;
             }
             if (attendance.some((a) => a.memberId === uid)) continue;
+            // Backend's `?search=` isn't always honored — name/email match
+            // client-side to keep the list relevant to what's typed.
+            const firstName = typeof u.firstName === "string" ? u.firstName : (typeof u.first_name === "string" ? u.first_name : undefined);
+            const lastName  = typeof u.lastName  === "string" ? u.lastName  : (typeof u.last_name  === "string" ? u.last_name  : undefined);
+            const email     = typeof u.email     === "string" ? u.email     : undefined;
+            const haystack = `${firstName ?? ""} ${lastName ?? ""} ${email ?? ""}`.toLowerCase();
+            if (!haystack.includes(needle)) continue;
             seen.add(uid);
             merged.push({
               uid,
-              firstName: typeof u.firstName === "string" ? u.firstName : (typeof u.first_name === "string" ? u.first_name : undefined),
-              lastName:  typeof u.lastName  === "string" ? u.lastName  : (typeof u.last_name  === "string" ? u.last_name  : undefined),
-              email:     typeof u.email     === "string" ? u.email     : undefined,
+              firstName,
+              lastName,
+              email,
               profilePhotoUrl: typeof u.profilePhotoUrl === "string" ? u.profilePhotoUrl : null,
               roles,
             });
@@ -208,9 +220,11 @@ export function AttendanceEditor({ attendance, onChange, roleFilter }: Props) {
                     Searching…
                   </div>
                 )}
-                {!searching && results.length === 0 && (
-                  <div style={{ padding: 12, fontFamily: "var(--font-body)", fontSize: 13 }}>
-                    <div style={{ color: "var(--color-muted)", marginBottom: 6 }}>No registered matches.</div>
+                {!searching && (
+                  <div style={{ padding: 12, fontFamily: "var(--font-body)", fontSize: 13, borderBottom: results.length > 0 ? "1px solid var(--color-stroke-2)" : undefined }}>
+                    {results.length === 0 && (
+                      <div style={{ color: "var(--color-muted)", marginBottom: 6 }}>No registered matches.</div>
+                    )}
                     <button
                       type="button"
                       onClick={() => addGuest(q.trim())}

@@ -62,12 +62,22 @@ export default function CellMembersPage() {
   const params = useParams();
   const cellId = (params?.cellId as string) ?? "";
   const user = useAppSelector((s) => s.session.user);
-  const canEdit = (user?.roles?.includes("leader") || user?.roles?.includes("g12") || user?.roles?.includes("super_admin") || user?.roles?.includes("admin")) ?? false;
   const roleFilter = cellMemberSearchRoles(user?.roles);
   const roleFilterKey = (roleFilter ?? []).join(",");
 
   const { cell, loading, refetch } = useCell(cellId || undefined);
   const { busy, addMembers, removeMember } = useCellMembers(cellId || undefined);
+
+  // G12 viewing a cell they only SUPERVISE → read-only. Mirrors the
+  // restriction on the cell-detail page; without this, a G12 could still
+  // add or remove members from the dedicated /members route.
+  const isAdmin = !!(user?.roles?.includes("admin") || user?.roles?.includes("super_admin"));
+  const isCellLeader = !!cell && cell.leaderUid === user?.uid;
+  const isSupervisorOnly =
+    !!cell && !isAdmin && !isCellLeader && cell.g12LeaderUid === user?.uid;
+  const canEdit =
+    !isSupervisorOnly &&
+    ((user?.roles?.includes("leader") || user?.roles?.includes("g12") || user?.roles?.includes("super_admin") || user?.roles?.includes("admin")) ?? false);
 
   const [search, setSearch]           = useState("");
   const [results, setResults]         = useState<UserResult[]>([]);
@@ -111,6 +121,7 @@ export default function CellMembersPage() {
         }
         const memberUids = new Set(members.map((m) => m.uid));
         const allowed = roleFilter && roleFilter.length > 0 ? new Set(roleFilter) : null;
+        const needle = term.toLowerCase();
         setResults(
           merged.filter((u) => {
             if (memberUids.has(u.uid)) return false;
@@ -121,6 +132,12 @@ export default function CellMembersPage() {
             // role, checking "any overlap" lets Leaders/G12 through — we
             // must instead enforce "no extra role beyond what's allowed".
             if (allowed && roles.length > 0 && roles.some((r) => !allowed.has(r))) return false;
+            // Backend's `?search=` isn't always honored — it may return the
+            // first page of users instead of name-filtered results. Apply
+            // a client-side name/email match so the UI matches what the
+            // user typed.
+            const haystack = `${u.firstName ?? ""} ${u.lastName ?? ""} ${u.email ?? ""}`.toLowerCase();
+            if (!haystack.includes(needle)) return false;
             return true;
           }),
         );

@@ -119,6 +119,7 @@ export function AddMemberDialog({ open, existingUids = [], roleFilter, busy, onC
         // Only drop obvious non-candidates here (no uid, or admin-role).
         // The "already in this cell" filter is applied at render time so
         // the fetch effect doesn't depend on the parent-renewed array.
+        const needle = term.toLowerCase();
         const safe = items.filter((u) => {
           if (!u.uid) return false;
           const roles = u.roles ?? [];
@@ -133,6 +134,11 @@ export function AddMemberDialog({ open, existingUids = [], roleFilter, busy, onC
             const allowed = new Set(roleFilter);
             if (roles.some((r) => !allowed.has(r))) return false;
           }
+          // Backend's `?search=` isn't always honored — fall back to a
+          // client-side name/email match so we don't list users that don't
+          // match what was typed.
+          const haystack = `${u.firstName ?? ""} ${u.lastName ?? ""} ${u.email ?? ""}`.toLowerCase();
+          if (!haystack.includes(needle)) return false;
           return true;
         });
         setResults(safe);
