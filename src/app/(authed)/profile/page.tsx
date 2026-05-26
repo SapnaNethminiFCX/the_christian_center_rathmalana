@@ -64,11 +64,20 @@ export default function ProfilePage() {
   const [gender, setGender] = useState<"" | "male" | "female" | "other">("");
   const [detailsDirty, setDetailsDirty] = useState(false);
 
-  // ── Qualifications list (localStorage; first entry's title mirrors to
-  //    the backend's qualificationTitle field via PATCH /me on save). ──
+  // Preferred language (saved with the unified Save button — selection still
+  // updates the UI locale live so the user sees the translations preview).
+  const [preferredLanguage, setPreferredLanguage] = useState<"en" | "si" | "ta">("en");
+  const [langDirty, setLangDirty] = useState(false);
+
+  // ── Qualifications list. The `extras` array holds the persistable shape
+  //    (id + title + fileUrl). Locally-picked PDFs (not yet uploaded) live
+  //    in `pendingFiles` — keyed by qualification id, holding the actual
+  //    File object so we can POST it on save. ──
   const [extras, setExtras] = useState<ProfileExtras>(EMPTY_PROFILE_EXTRAS);
   const [extrasDirty, setExtrasDirty] = useState(false);
-  const [extrasSaving, setExtrasSaving] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<Record<string, File>>({});
+  // Kept for parity with previous structure — unified save uses P.saving.
+  const extrasSaving = P.saving;
 
   // Password fields
   const [currentPw,    setCurrentPw]    = useState("");
@@ -88,31 +97,47 @@ export default function ProfilePage() {
       setAddress(P.user.address ?? "");
       setDateOfBirth(P.user.dateOfBirth ?? "");
       setGender((P.user.gender ?? "") as "" | "male" | "female" | "other");
+      setPreferredLanguage((P.user.preferredLanguage ?? "en") as "en" | "si" | "ta");
       setDirty(false);
       setDetailsDirty(false);
+      setLangDirty(false);
     }
   }, [P.user]);
 
-  // Hydrate the qualifications list from localStorage. If localStorage is
-  // empty but the backend already has a single qualificationTitle (from the
-  // previous single-field form), seed the list with one entry so the user
-  // doesn't lose their existing data.
+  // Hydrate the qualifications list. Priority:
+  //   1. Backend `user.qualifications` array (V2 PATCH /me §3.2)
+  //   2. localStorage fallback (pre-V2 behaviour, kept so users don't lose
+  //      drafts when the backend hasn't echoed the array yet)
+  //   3. Single legacy `qualificationTitle` field — seed one entry from it
   useEffect(() => {
     if (!P.user?.uid) return;
-    const stored = loadProfileExtras(P.user.uid);
-    if (stored.qualifications.length === 0 && P.user.qualificationTitle) {
+    const backendList = P.user.qualifications;
+    if (Array.isArray(backendList) && backendList.length > 0) {
       setExtras({
-        qualifications: [{
-          id: newQualificationId(),
-          title: P.user.qualificationTitle,
-          attachmentName: null,
-        }],
+        qualifications: backendList.map((q) => ({
+          id: q.id,
+          title: q.title,
+          fileUrl: q.fileUrl ?? null,
+          pendingFileName: null,
+        })),
       });
     } else {
-      setExtras(stored);
+      const stored = loadProfileExtras(P.user.uid);
+      if (stored.qualifications.length === 0 && P.user.qualificationTitle) {
+        setExtras({
+          qualifications: [{
+            id: newQualificationId(),
+            title: P.user.qualificationTitle,
+            fileUrl: null,
+            pendingFileName: null,
+          }],
+        });
+      } else {
+        setExtras(stored);
+      }
     }
     setExtrasDirty(false);
-  }, [P.user?.uid, P.user?.qualificationTitle]);
+  }, [P.user?.uid, P.user?.qualificationTitle, P.user?.qualifications]);
 
   /* ── Qualification list handlers ─────────────────────────────────── */
 
@@ -120,7 +145,7 @@ export default function ProfilePage() {
     setExtras((prev) => ({
       qualifications: [
         ...prev.qualifications,
-        { id: newQualificationId(), title: "", attachmentName: null },
+        { id: newQualificationId(), title: "", fileUrl: null, pendingFileName: null },
       ],
     }));
     setExtrasDirty(true);
@@ -158,9 +183,13 @@ export default function ProfilePage() {
       e.target.value = "";
       return;
     }
+    // Stash the File object in pendingFiles + the name in the entry. On
+    // save we POST /me/qualification to upload it and receive the real
+    // fileUrl, which gets baked into the PATCH /me payload.
+    setPendingFiles((prev) => ({ ...prev, [id]: file }));
     setExtras((prev) => ({
       qualifications: prev.qualifications.map((q) =>
-        q.id === id ? { ...q, attachmentName: file.name } : q,
+        q.id === id ? { ...q, pendingFileName: file.name } : q,
       ),
     }));
     setExtrasDirty(true);
@@ -168,65 +197,104 @@ export default function ProfilePage() {
   };
 
   const removeQualificationAttachment = (id: string) => {
+    setPendingFiles((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     setExtras((prev) => ({
       qualifications: prev.qualifications.map((q) =>
-        q.id === id ? { ...q, attachmentName: null } : q,
+        q.id === id ? { ...q, fileUrl: null, pendingFileName: null } : q,
       ),
     }));
     setExtrasDirty(true);
   };
 
-  /** Save the qualifications list. The full array (multiple titles +
-   *  attachments) lives in localStorage; the FIRST entry's title is also
-   *  mirrored to the backend's `qualificationTitle` field so the
-   *  apply-student gate continues to work. Backend will be extended to
-   *  accept the full array — when that lands, swap this for a single
-   *  PATCH that sends the whole `qualifications` array. */
-  const onSaveExtras = async () => {
-    if (!P.user?.uid) return;
-    setExtrasSaving(true);
-    saveProfileExtras(P.user.uid, extras);
-
-    const primaryTitle = extras.qualifications[0]?.title.trim() ?? "";
-    const backendValue = P.user.qualificationTitle ?? "";
-    if (primaryTitle !== backendValue) {
-      await P.updateProfile({ qualificationTitle: primaryTitle || null });
-    }
-
-    setExtrasDirty(false);
-    setExtrasSaving(false);
-    dispatch(pushToast({ tone: "success", title: "Qualifications saved" }));
-  };
-
-  const onCancelExtras = () => {
-    setExtras(loadProfileExtras(P.user?.uid));
-    setExtrasDirty(false);
-  };
-
-  /** Save the three Personal Details fields via PATCH /me §3.2.
-   *  qualificationTitle is saved separately by onSaveExtras below. */
-  const onSaveDetails = async () => {
+  /**
+   * Unified save — Profile + Personal + Qualifications + Language all go in
+   * a single PATCH /me request (V2 §3.2). Password change stays separate
+   * because it uses a different endpoint.
+   *
+   * Sends ALL PATCH-able fields on every save (not just dirty ones). This
+   * is more defensive: if the backend's field-allowlist or persistence
+   * layer ever drops a missing field, sending the full state every time
+   * ensures the user's complete profile state is always present in the
+   * request — the backend cannot silently lose unchanged data.
+   *
+   * On success we dispatch `setUser(updated)` from the backend's response,
+   * so Redux always reflects the canonical server state (no optimistic
+   * overlays).
+   */
+  const onSaveAll = async () => {
     if (!P.user) return;
-    const changes: Parameters<typeof P.updateProfile>[0] = {};
-    if (address.trim() !== (P.user.address ?? "")) {
-      changes.address = address.trim() || null;
+
+    // 1. Upload any locally-picked PDFs first so each entry has its real
+    //    `fileUrl` baked in before the PATCH body is built.
+    let nextExtras = extras;
+    if (Object.keys(pendingFiles).length > 0) {
+      const uploadedUrlByQid: Record<string, string> = {};
+      for (const q of extras.qualifications) {
+        const file = pendingFiles[q.id];
+        if (!file) continue;
+        const url = await P.uploadQualification(file);
+        if (!url) return; // upload error toast already shown inside the hook
+        uploadedUrlByQid[q.id] = url;
+      }
+      nextExtras = {
+        qualifications: extras.qualifications.map((q) =>
+          uploadedUrlByQid[q.id]
+            ? { ...q, fileUrl: uploadedUrlByQid[q.id], pendingFileName: null }
+            : q,
+        ),
+      };
     }
-    if (dateOfBirth !== (P.user.dateOfBirth ?? "")) {
-      changes.dateOfBirth = dateOfBirth || null;
-    }
-    if (gender !== (P.user.gender ?? "")) {
-      changes.gender = gender || null;
-    }
+
+    // 2. Build the FULL PATCH /me payload — every PATCH-able field per
+    //    spec §3.2 is included on every save. Empty strings normalise to
+    //    `null` for nullable fields so the backend can clear them.
+    const changes: Parameters<typeof P.updateProfile>[0] = {
+      firstName:         firstName.trim(),
+      lastName:          lastName.trim(),
+      phoneNumber:       phoneNumber.trim() || null,
+      address:           address.trim() || null,
+      dateOfBirth:       dateOfBirth || null,
+      gender:            gender || null,
+      preferredLanguage: preferredLanguage,
+      qualifications:    nextExtras.qualifications
+        .filter((q) => q.title.trim())
+        .map((q) => ({ id: q.id, title: q.title.trim(), fileUrl: q.fileUrl ?? null })),
+    };
+
     const ok = await P.updateProfile(changes);
-    if (ok) setDetailsDirty(false);
+    if (ok) {
+      // PATCH response was used by updateProfile to update Redux; mirror
+      // the local extras + clear UI-only state.
+      setExtras(nextExtras);
+      if (P.user.uid) saveProfileExtras(P.user.uid, nextExtras);
+      setPendingFiles({});
+      setDirty(false);
+      setDetailsDirty(false);
+      setExtrasDirty(false);
+      setLangDirty(false);
+    }
   };
 
-  const onCancelDetails = () => {
+  /** Cancel ALL unsaved changes across the four sections. */
+  const onCancelAll = () => {
     if (!P.user) return;
+    setFirstName(P.user.firstName ?? "");
+    setLastName(P.user.lastName  ?? "");
+    setPhoneNumber(P.user.phoneNumber ?? "");
     setAddress(P.user.address ?? "");
     setDateOfBirth(P.user.dateOfBirth ?? "");
     setGender((P.user.gender ?? "") as "" | "male" | "female" | "other");
+    setPreferredLanguage((P.user.preferredLanguage ?? "en") as "en" | "si" | "ta");
+    setExtras(loadProfileExtras(P.user.uid));
+    setPendingFiles({});
+    setDirty(false);
     setDetailsDirty(false);
+    setExtrasDirty(false);
+    setLangDirty(false);
   };
 
   if (!P.user) {
@@ -239,23 +307,8 @@ export default function ProfilePage() {
 
   const fullName = `${P.user.firstName} ${P.user.lastName}`.trim();
 
-  const onSave = async () => {
-    const changes: Parameters<typeof P.updateProfile>[0] = {};
-    if (firstName.trim() !== (P.user!.firstName ?? "")) changes.firstName = firstName.trim();
-    if (lastName.trim()  !== (P.user!.lastName  ?? "")) changes.lastName  = lastName.trim();
-    if (phoneNumber.trim() !== (P.user!.phoneNumber ?? "")) {
-      changes.phoneNumber = phoneNumber.trim() || null;
-    }
-    const ok = await P.updateProfile(changes);
-    if (ok) setDirty(false);
-  };
-
-  const onCancel = () => {
-    setFirstName(P.user!.firstName ?? "");
-    setLastName(P.user!.lastName  ?? "");
-    setPhoneNumber(P.user!.phoneNumber ?? "");
-    setDirty(false);
-  };
+  // Single source of dirtiness across the four PATCH /me sections.
+  const anyDirty = dirty || detailsDirty || extrasDirty || langDirty;
 
   const onFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -382,12 +435,6 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        <div className="form-actions">
-          <Button variant="ghost" onClick={onCancel} disabled={!dirty || P.saving}>Cancel</Button>
-          <Button icon="check" onClick={onSave} disabled={!dirty || P.saving}>
-            {P.saving ? "Saving…" : "Save changes"}
-          </Button>
-        </div>
       </div>
 
       {/* ── Personal details (PATCH /me §3.2) ───────────────────────── */}
@@ -448,14 +495,6 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        <div className="form-actions">
-          <Button variant="ghost" onClick={onCancelDetails} disabled={!detailsDirty || P.saving}>
-            Cancel
-          </Button>
-          <Button icon="check" onClick={onSaveDetails} disabled={!detailsDirty || P.saving}>
-            {P.saving ? "Saving…" : "Save details"}
-          </Button>
-        </div>
       </div>
 
       {/* ── Qualifications (optional; each can have a PDF attachment) ── */}
@@ -502,15 +541,6 @@ export default function ProfilePage() {
         <Button type="button" variant="secondary" icon="plus" size="sm" onClick={addQualification}>
           Add qualification
         </Button>
-
-        <div className="form-actions">
-          <Button variant="ghost" onClick={onCancelExtras} disabled={!extrasDirty || extrasSaving}>
-            Cancel
-          </Button>
-          <Button icon="check" onClick={onSaveExtras} disabled={!extrasDirty || extrasSaving}>
-            {extrasSaving ? "Saving…" : "Save qualifications"}
-          </Button>
-        </div>
       </div>
 
       {/* ── Language ──────────────────────────────────────────────── */}
@@ -522,11 +552,66 @@ export default function ProfilePage() {
             Preferred language
           </span>
           <LanguageSwitcher
-            onChange={async (code) => {
+            current={preferredLanguage === "si" ? "SI" : preferredLanguage === "ta" ? "TA" : "EN"}
+            onChange={(code) => {
               const map = { EN: "en", SI: "si", TA: "ta" } as const;
-              await P.updateProfile({ preferredLanguage: map[code] });
+              const next = map[code];
+              setPreferredLanguage(next);
+              setLangDirty(next !== (P.user?.preferredLanguage ?? "en"));
             }}
           />
+        </div>
+      </div>
+
+      {/* ── Unified Save bar — Profile + Personal + Qualifications + Language
+            all submit in a single PATCH /me. Password keeps its own button
+            below (different endpoint). ──────────────────────────────────── */}
+      <div
+        style={{
+          position: "sticky",
+          bottom: 0,
+          marginTop: 4,
+          background: "linear-gradient(180deg, rgba(255,255,255,0) 0%, var(--color-surface) 40%)",
+          paddingTop: 14,
+          paddingBottom: 14,
+          zIndex: 5,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+            padding: "14px 18px",
+            background: "#fff",
+            border: "1px solid var(--color-stroke)",
+            borderRadius: 14,
+            boxShadow: "var(--shadow-sm)",
+          }}
+        >
+          <div style={{ fontFamily: "var(--font-body)", fontSize: 13, color: "var(--color-body-green)" }}>
+            {anyDirty ? (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 9999, background: "var(--color-warning)" }} />
+                Unsaved changes
+              </span>
+            ) : (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--color-muted)" }}>
+                <Icon name="check-circle" size={14} />
+                All changes saved
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <Button variant="ghost" onClick={onCancelAll} disabled={!anyDirty || P.saving}>
+              Cancel
+            </Button>
+            <Button icon="check" onClick={onSaveAll} disabled={!anyDirty || P.saving}>
+              {P.saving ? "Saving…" : "Save changes"}
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -662,37 +747,96 @@ function QualificationRow({
           size="sm"
           onClick={() => fileInputRef.current?.click()}
         >
-          {qualification.attachmentName ? "Replace attachment" : "Attach PDF (optional)"}
+          {(qualification.fileUrl || qualification.pendingFileName) ? "Replace attachment" : "Attach PDF (optional)"}
         </Button>
-        {qualification.attachmentName && (
-          <span
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              fontFamily: "var(--font-mono)",
-              fontSize: 12,
-              color: "var(--color-body-green)",
-            }}
-          >
-            <Icon name="file-text" size={14} />
-            {qualification.attachmentName}
-            <button
-              type="button"
-              onClick={onRemoveAttachment}
-              style={{
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                color: "var(--color-muted)",
-                display: "flex",
-              }}
-              aria-label="Remove attachment"
-            >
-              <Icon name="x" size={14} />
-            </button>
-          </span>
-        )}
+        {(qualification.fileUrl || qualification.pendingFileName) && (() => {
+          // Derive a friendly filename:
+          //   - Uploaded → take the last path segment of the URL, drop the
+          //     storage hash if present (e.g. "abc123-OL_certificate.pdf"
+          //     → "OL_certificate.pdf"), decode URI-encoding.
+          //   - Pending → use the locally-picked filename as-is.
+          const displayName = qualification.pendingFileName
+            ?? (() => {
+              const last = qualification.fileUrl?.split("/").pop() ?? "Attached";
+              try {
+                const decoded = decodeURIComponent(last.split("?")[0]);
+                // Firebase storage keys often look like "q-xxx-FILENAME.pdf"
+                // — strip the "q-...-" prefix if found.
+                return decoded.replace(/^q-[a-z0-9]+-[a-z0-9]+-?/i, "") || decoded;
+              } catch {
+                return last;
+              }
+            })();
+          const isUploaded = !!qualification.fileUrl;
+          return (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              {isUploaded ? (
+                <a
+                  href={qualification.fileUrl ?? "#"}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "4px 10px",
+                    borderRadius: 9999,
+                    background: "rgba(188,233,85,0.18)",
+                    border: "1px solid rgba(188,233,85,0.5)",
+                    fontFamily: "var(--font-body)",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--color-primary)",
+                    textDecoration: "none",
+                    cursor: "pointer",
+                  }}
+                  title="Open PDF in new tab"
+                >
+                  <Icon name="file-text" size={14} />
+                  {displayName}
+                  <Icon name="external-link" size={11} style={{ opacity: 0.7 }} />
+                </a>
+              ) : (
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "4px 10px",
+                    borderRadius: 9999,
+                    background: "var(--color-stroke-2)",
+                    fontFamily: "var(--font-body)",
+                    fontSize: 12,
+                    fontWeight: 500,
+                    color: "var(--color-body-green)",
+                  }}
+                  title="Will upload when you click Save changes"
+                >
+                  <Icon name="file-text" size={14} />
+                  {displayName}
+                  <span style={{ fontSize: 10, color: "var(--color-warning)", fontWeight: 700, marginLeft: 4 }}>
+                    PENDING
+                  </span>
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={onRemoveAttachment}
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  color: "var(--color-muted)",
+                  display: "flex",
+                  padding: 2,
+                }}
+                aria-label="Remove attachment"
+              >
+                <Icon name="x" size={14} />
+              </button>
+            </span>
+          );
+        })()}
       </div>
     </div>
   );

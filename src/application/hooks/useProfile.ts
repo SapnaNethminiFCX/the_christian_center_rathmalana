@@ -26,6 +26,9 @@ interface ProfileUpdate {
   gender?: "male" | "female" | "other" | null;
   address?: string | null;
   qualificationTitle?: string | null;
+  /** V2 PATCH /me §3.2: ordered list of qualification entries. The first
+   *  entry is auto-used as the primary qualification on role requests. */
+  qualifications?: { id: string; title: string; fileUrl: string | null }[];
 }
 
 export function useProfile() {
@@ -46,23 +49,31 @@ export function useProfile() {
     setFieldErrors((prev) => { const next = { ...prev }; delete next[field]; return next; });
   const clearAllErrors = () => setFieldErrors({});
 
-  /** Update profile via PATCH /me — only send changed fields. */
+  /**
+   * Update profile via PATCH /me.
+   *
+   * Caller is expected to send the FULL profile payload every time (all
+   * PATCH-able fields per spec §3.2), not just dirty ones. This keeps the
+   * backend's view of the user's profile complete on every save.
+   *
+   * Does NOT write to Redux. Redux is the source of truth for the
+   * SIGNED-IN user as established by the most recent GET /me; PATCH /me
+   * here just fires the save request. The next GET /me (page reload,
+   * re-login, etc.) will refresh Redux from the server's canonical state.
+   */
   const updateProfile = useCallback(
     async (changes: ProfileUpdate): Promise<boolean> => {
       if (Object.keys(changes).length === 0) return true;
       setSaving(true);
       clearAllErrors();
       try {
-        const updated = await apiRequest<SessionUser>("/me", {
+        await apiRequest<SessionUser>("/me", {
           method: "PATCH",
           body: changes,
         });
-        // Backend's PATCH response sometimes strips fields it accepts but
-        // doesn't echo (e.g. `phone`). Merge the request body back so the UI
-        // reflects what the user just submitted. Once backend echoes every
-        // accepted field, this becomes a no-op.
-        dispatch(setUser({ ...updated, ...changes } as SessionUser));
-        // Keep locale slice in sync when preferred language changes.
+        // Locale slice is a UI-only concern (controls next-intl catalogue)
+        // and lives outside the session user, so flip it immediately on
+        // language change so the UI re-renders in the new language.
         if (changes.preferredLanguage) {
           dispatch(setLocale(changes.preferredLanguage));
         }
@@ -138,6 +149,80 @@ export function useProfile() {
       }
     },
     [dispatch, user],
+  );
+
+  /**
+   * Upload a qualification PDF via POST /me/qualification (multipart).
+   * Backend uploads to Firebase Storage and returns the hosted URL, which
+   * the caller then includes in the next PATCH /me { qualifications: [...] }
+   * payload to associate the file with a specific entry.
+   *
+   * Per spec §3.2, `fileUrl` on a qualification entry IS this URL.
+   *
+   * Toasts on failure; on success the caller chains the URL into PATCH /me
+   * (no toast here so the unified Save flow only shows one success toast).
+   */
+  const uploadQualification = useCallback(
+    async (file: File): Promise<string | null> => {
+      if (file.type !== "application/pdf") {
+        dispatch(pushToast({ tone: "warning", title: "Invalid file", message: "Only PDF files are accepted." }));
+        return null;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        dispatch(pushToast({ tone: "warning", title: "File too large", message: "Max 5 MB per attachment." }));
+        return null;
+      }
+      try {
+        const form = new FormData();
+        // Backend expects the form field named "qualification" — confirmed
+        // against the POST /me/qualification endpoint contract.
+        form.append("qualification", file);
+
+        const { tokenService } = await import("@/infrastructure/firebase/tokenService");
+        const token = await tokenService.get();
+        const res = await fetch(`${API_PREFIX}/me/qualification`, {
+          method: "POST",
+          headers: {
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            "Accept-Language": localStorage.getItem("edupath.locale") ?? "en",
+          },
+          body: form,
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({})) as { error?: { message?: string } };
+          dispatch(pushToast({
+            tone: "warning",
+            title: "Couldn't upload PDF",
+            message: err?.error?.message ?? `Server returned ${res.status}.`,
+          }));
+          return null;
+        }
+
+        // Defensive parse — backend response shape may vary. Try the obvious
+        // fields in order: fileUrl, url, qualificationUrl, downloadUrl.
+        const data = await res.json().catch(() => ({})) as Record<string, unknown>;
+        const url =
+          typeof data.fileUrl === "string"           ? data.fileUrl
+          : typeof data.url === "string"             ? data.url
+          : typeof data.qualificationUrl === "string" ? data.qualificationUrl
+          : typeof data.downloadUrl === "string"     ? data.downloadUrl
+          : null;
+        if (!url) {
+          dispatch(pushToast({
+            tone: "warning",
+            title: "Upload returned no URL",
+            message: "The PDF reached the server but no fileUrl came back. Check backend response shape.",
+          }));
+          return null;
+        }
+        return url;
+      } catch {
+        dispatch(pushToast({ tone: "warning", title: "Upload failed", message: "Check your connection and try again." }));
+        return null;
+      }
+    },
+    [dispatch],
   );
 
   /** Change password via POST /me/change-password. */
@@ -262,6 +347,7 @@ export function useProfile() {
     clearFieldError,
     updateProfile,
     uploadAvatar,
+    uploadQualification,
     changePassword,
     updateNotificationPrefs,
     linkProvider,

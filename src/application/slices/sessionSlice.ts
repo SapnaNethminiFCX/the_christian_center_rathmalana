@@ -58,9 +58,20 @@ export interface SessionUser {
   dateOfBirth?: string | null;
   gender?: "male" | "female" | "other" | null;
   address?: string | null;
+  /** V2 GET /me §3.1: ordered list of qualification entries. Each entry's
+   *  `fileUrl` is returned by the separate POST /me/qualification upload. */
+  qualifications?: { id: string; title: string; fileUrl: string | null }[];
+  /** Convenience fields — backend derives these from `qualifications[0]`.
+   *  Read-only on PATCH; the array is the source of truth. */
   qualificationTitle?: string | null;
+  qualificationUrl?: string | null;
+  qualificationStoragePath?: string | null;
+  /** V2 GET /me §3.1: registered FCM push tokens. */
+  fcmTokens?: string[];
   createdAt?: string;
   updatedAt?: string;
+  /** V2 GET /me §3.1: non-null when the account is soft-deleted. */
+  deletedAt?: string | null;
   name?: string;
   avatar?: string;
 }

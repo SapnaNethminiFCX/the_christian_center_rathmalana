@@ -34,11 +34,11 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
-import { useCells, useCellMutations, type Cell, type CellType } from "@/application/hooks/useCells";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useCells, type Cell, type CellType } from "@/application/hooks/useCells";
 import { useAppDispatch } from "@/application/hooks/useAppDispatch";
 import { pushToast } from "@/application/slices/uiSlice";
 import { apiRequest, ApiRequestError } from "@/infrastructure/api/request";
-import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 const TYPE_LABEL: Record<CellType, string> = {
   g12: "G12",
@@ -75,9 +75,48 @@ export default function AdminCellDetailPage() {
   // In-memory transfer log — every ownership change is applied here so the UI
   // reflects it without a backend round-trip.
   const [overrides, setOverrides] = useState<Record<string, Partial<Cell>>>({});
+
+  // Display-name enrichment — GET /cells doesn't reliably populate
+  // leaderName / g12LeaderName, so we look up unique uids via /users/:uid
+  // and cache them.
+  const [namesByUid, setNamesByUid] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (rawCells.length === 0) return;
+    const uids = new Set<string>();
+    for (const c of rawCells) {
+      if (c.leaderUid && !c.leaderName && !namesByUid[c.leaderUid]) uids.add(c.leaderUid);
+      if (c.g12LeaderUid && !c.g12LeaderName && !namesByUid[c.g12LeaderUid]) uids.add(c.g12LeaderUid);
+    }
+    if (uids.size === 0) return;
+    let cancelled = false;
+    (async () => {
+      const next: Record<string, string> = {};
+      await Promise.allSettled(
+        Array.from(uids).map(async (uid) => {
+          try {
+            const u = await apiRequest<{ firstName?: string; lastName?: string; email?: string }>(`/users/${uid}`);
+            const composed = [u.firstName, u.lastName].filter(Boolean).join(" ").trim();
+            const display = composed || u.email || "";
+            if (display) next[uid] = display;
+          } catch { /* ignore */ }
+        }),
+      );
+      if (!cancelled && Object.keys(next).length > 0) {
+        setNamesByUid((prev) => ({ ...prev, ...next }));
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawCells]);
+
   const cells: Cell[] = useMemo(
-    () => rawCells.map((c) => ({ ...c, ...(overrides[c.id] ?? {}) })),
-    [rawCells, overrides],
+    () => rawCells.map((c) => {
+      const fromOverride = overrides[c.id] ?? {};
+      const leaderName    = c.leaderName    ?? fromOverride.leaderName    ?? (c.leaderUid    ? namesByUid[c.leaderUid]    : undefined);
+      const g12LeaderName = c.g12LeaderName ?? fromOverride.g12LeaderName ?? (c.g12LeaderUid ? namesByUid[c.g12LeaderUid] : undefined);
+      return { ...c, ...fromOverride, leaderName, g12LeaderName };
+    }),
+    [rawCells, overrides, namesByUid],
   );
 
   const cell = cells.find((c) => c.id === params.cellId) ?? null;
@@ -101,21 +140,51 @@ export default function AdminCellDetailPage() {
     kind: "leader",
   });
 
-  // DELETE /cells/:id — admin/super_admin always permitted per V2 spec §13.7.
-  const { deleteCell: deleteCellApi } = useCellMutations();
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleting, setDeleting] = useState(false);
+  // Demote-previous-owner prompt — shown only when the previous owner has
+  // no OTHER cells in this role anywhere in the org, so demoting them
+  // wouldn't break other cells they lead/supervise.
+  const [demotePrompt, setDemotePrompt] = useState<
+    { open: boolean; uid: string; name: string; role: "leader" | "g12" } | null
+  >(null);
+  const [demoting, setDemoting] = useState(false);
 
-  const handleDeleteCell = async () => {
-    if (!cell) return;
-    setDeleting(true);
-    const ok = await deleteCellApi(cell.id);
-    setDeleting(false);
-    if (ok) {
-      setDeleteOpen(false);
-      router.push(`${base}/cells`);
+  const handleConfirmDemote = async () => {
+    if (!demotePrompt) return;
+    setDemoting(true);
+    try {
+      await apiRequest(`/users/${demotePrompt.uid}/demote`, {
+        method: "POST",
+        body: { role: demotePrompt.role },
+      });
+      dispatch(pushToast({
+        tone: "success",
+        title: `${demotePrompt.name} demoted to Member`,
+        message: `They no longer hold the ${demotePrompt.role === "g12" ? "G12" : "Leader"} role org-wide.`,
+      }));
+      setDemotePrompt(null);
+    } catch (err) {
+      let title = "Demote failed";
+      let message: string | undefined = "Couldn't demote the previous owner.";
+      if (err instanceof ApiRequestError) {
+        if (err.status === 403) {
+          title = "Not permitted";
+          message = err.message || "You can't strip this role.";
+        } else if (err.status === 404) {
+          title = "User not found";
+          message = "The previous owner could not be located.";
+        } else if (err.status === 400) {
+          title = "Demote validation failed";
+          message = err.message;
+        } else if (err.message) {
+          message = err.message;
+        }
+      }
+      dispatch(pushToast({ tone: "warning", title, message }));
+    } finally {
+      setDemoting(false);
     }
   };
+
 
   if (loading && !cell) {
     return (
@@ -145,77 +214,150 @@ export default function AdminCellDetailPage() {
     );
   }
 
+  /**
+   * Transfer cell ownership via POST /cells/:id/transfer-ownership (V2 §13.7b).
+   *
+   * Sends one request per selected cell. The endpoint accepts `leaderUid`
+   * and/or `g12LeaderUid` — we set only the field matching the chosen `kind`.
+   *
+   * Per spec the previous owner is NOT auto-demoted; they keep their role
+   * but lose ownership of this specific cell. The new owner receives an
+   * in-app notification + email courtesy of the backend.
+   */
   const handleTransfer = async (
     selectedCellIds: string[],
     target: DirectoryUser,
     kind: "leader" | "g12",
   ) => {
-    // Identify the outgoing owner — the demote endpoint targets the user
-    // who currently holds the role on THIS cell (per the dialog, all selected
-    // cells share the same owner). Snapshot it BEFORE we apply local
-    // overrides since we'll mutate them next.
-    const outgoingUid = kind === "leader" ? cell?.leaderUid : cell?.g12LeaderUid;
-    const outgoingName = kind === "leader" ? cell?.leaderName : cell?.g12LeaderName;
+    const targetName = fullName(target);
 
-    // Apply local cell-ownership change first — keeps the UI snappy even if
-    // the demote call below is slow / fails. The cell-PATCH endpoint isn't
-    // wired here yet; only the demote API is integrated this round.
-    setOverrides((prev) => {
-      const next = { ...prev };
-      for (const id of selectedCellIds) {
-        next[id] = {
-          ...(next[id] ?? {}),
-          ...(kind === "leader"
-            ? { leaderUid: target.uid, leaderName: fullName(target) }
-            : { g12LeaderUid: target.uid, g12LeaderName: fullName(target) }),
-        };
-      }
-      return next;
-    });
-    setTransferDialog({ open: false, kind: "leader" });
-
-    // Strip the role from the outgoing owner via POST /users/:uid/demote
-    // (spec §4.10). admin / super_admin can demote student / leader / g12;
-    // 204 No Content on success; idempotent if the user no longer holds
-    // the role. Custom claims update immediately on the backend; the
-    // demoted user picks up the new claims at their next token refresh.
-    if (!outgoingUid) {
-      dispatch(pushToast({
-        tone: "success",
-        title: "Ownership transferred",
-        message: `${selectedCellIds.length} cell${selectedCellIds.length === 1 ? "" : "s"} now under ${fullName(target)}. No previous owner to demote.`,
-      }));
-      return;
+    // Snapshot the previous owners (one per selected cell) BEFORE the
+    // transfer goes through. Used after success to detect orphans —
+    // owners who lose their only cell — and offer a demote prompt.
+    const previousOwners = new Map<
+      string /* cell id */,
+      { uid: string; name: string } | null
+    >();
+    for (const id of selectedCellIds) {
+      const c = cells.find((x) => x.id === id);
+      if (!c) { previousOwners.set(id, null); continue; }
+      const uid = kind === "leader" ? c.leaderUid : (c.g12LeaderUid ?? "");
+      if (!uid || uid === target.uid) { previousOwners.set(id, null); continue; }
+      const name = kind === "leader"
+        ? (c.leaderName ?? "Previous owner")
+        : (c.g12LeaderName ?? "Previous owner");
+      previousOwners.set(id, { uid, name });
     }
 
-    try {
-      await apiRequest(`/users/${outgoingUid}/demote`, {
-        method: "POST",
-        body: { role: kind },
+    // Send the PATCH-style transfer per cell. Track per-cell outcomes so we
+    // can surface partial failures (rare but possible — e.g. one cell got
+    // archived between dialog open and confirm).
+    const results = await Promise.allSettled(
+      selectedCellIds.map((id) =>
+        apiRequest<Cell>(`/cells/${id}/transfer-ownership`, {
+          method: "POST",
+          body: kind === "leader"
+            ? { leaderUid: target.uid }
+            : { g12LeaderUid: target.uid },
+        }),
+      ),
+    );
+
+    // Apply local override for cells that succeeded so the UI updates
+    // immediately. Failed cells stay on their previous owner.
+    const succeeded: string[] = [];
+    const failures: { id: string; status: number; code?: string; message: string }[] = [];
+    results.forEach((r, i) => {
+      const id = selectedCellIds[i];
+      if (r.status === "fulfilled") {
+        succeeded.push(id);
+      } else {
+        const err = r.reason;
+        if (err instanceof ApiRequestError) {
+          failures.push({ id, status: err.status, code: err.code, message: err.message });
+        } else {
+          failures.push({ id, status: 0, message: (err as Error)?.message ?? "Unknown error" });
+        }
+      }
+    });
+
+    if (succeeded.length > 0) {
+      const updatedFields = kind === "leader"
+        ? { leaderUid: target.uid, leaderName: targetName }
+        : { g12LeaderUid: target.uid, g12LeaderName: targetName };
+      setOverrides((prev) => {
+        const next = { ...prev };
+        for (const id of succeeded) {
+          next[id] = { ...(next[id] ?? {}), ...updatedFields };
+        }
+        return next;
       });
+    }
+
+    setTransferDialog({ open: false, kind: "leader" });
+
+    // Compose user-facing toasts. Spec says the previous owner remains in
+    // the cell as a member (not auto-demoted); call that out explicitly so
+    // the operator knows the rest of the change is on them via /users/:uid/demote.
+    if (succeeded.length > 0 && failures.length === 0) {
       dispatch(pushToast({
         tone: "success",
-        title: "Ownership transferred & previous owner demoted",
-        message: `${selectedCellIds.length} cell${selectedCellIds.length === 1 ? "" : "s"} now under ${fullName(target)}. ${outgoingName ?? "Previous owner"} demoted to Member — they'll see the change at next sign-in.`,
+        title: succeeded.length === 1 ? "Ownership transferred" : `${succeeded.length} cells transferred`,
+        message: `${kind === "g12" ? "G12 Leader" : "Cell Leader"} is now ${targetName}. The previous owner remains a member of the cell.`,
       }));
-    } catch (err) {
-      // Transfer UI is already applied — surface the demote failure
-      // separately so the operator knows the role wasn't stripped.
-      let title = "Owner demote failed";
-      let message =
-        "Ownership of the cell was updated in the UI, but the previous owner's role could not be removed.";
-      if (err instanceof ApiRequestError) {
-        if (err.status === 403) {
-          title = "Demote not permitted";
-          message = err.message || `Your role can't remove the '${kind}' role.`;
-        } else if (err.status === 404) {
-          title = "User not found";
-          message = "The previous owner could not be located.";
-        } else if (err.status === 400) {
-          title = "Demote validation failed";
-          message = err.message;
-        } else if (err.message) {
-          message = err.message;
+
+      // Option-A demote prompt — find unique previous owners across the
+      // succeeded cells. For each, count how many OTHER cells they still
+      // hold the same role on (counting from rawCells minus the cells we
+      // just transferred away from them). If the count is 0, prompt the
+      // admin to demote that user too.
+      const succeededIds = new Set(succeeded);
+      const uniquePrevOwners = new Map<string, { uid: string; name: string }>();
+      for (const [cellId, prev] of previousOwners.entries()) {
+        if (!prev || !succeededIds.has(cellId)) continue;
+        if (!uniquePrevOwners.has(prev.uid)) uniquePrevOwners.set(prev.uid, prev);
+      }
+
+      for (const { uid, name } of uniquePrevOwners.values()) {
+        const stillHasOtherCells = rawCells.some((c) => {
+          if (succeededIds.has(c.id)) return false; // we just removed them here
+          return kind === "leader" ? c.leaderUid === uid : c.g12LeaderUid === uid;
+        });
+        if (!stillHasOtherCells) {
+          // Open the prompt for the first orphan we find. If there are
+          // multiple unique previous owners (rare — would require a
+          // multi-cell transfer where each cell had a different prior
+          // owner), we handle one at a time.
+          setDemotePrompt({ open: true, uid, name, role: kind });
+          break;
+        }
+      }
+    } else if (succeeded.length > 0 && failures.length > 0) {
+      dispatch(pushToast({
+        tone: "warning",
+        title: `${succeeded.length} of ${selectedCellIds.length} transferred`,
+        message: `${failures.length} cell${failures.length === 1 ? "" : "s"} failed — see network tab for details.`,
+      }));
+    } else {
+      // All failed — surface the first error's specific reason.
+      const first = failures[0];
+      let title = "Transfer failed";
+      let message = first?.message ?? "Couldn't transfer ownership.";
+      if (first) {
+        if (first.code === "NO_CHANGE" || first.status === 422) {
+          title = "No change";
+          message = "The selected owner is already in that role on this cell.";
+        } else if (first.code === "INVALID_STATE" || first.status === 409) {
+          title = "Cell is archived";
+          message = "Archived cells cannot have ownership transferred.";
+        } else if (first.status === 403) {
+          title = "Not permitted";
+          message = "Only admin or super_admin can transfer cell ownership.";
+        } else if (first.status === 404) {
+          title = "Cell not found";
+          message = "It may have been deleted.";
+        } else if (first.status === 400) {
+          title = "Validation error";
         }
       }
       dispatch(pushToast({ tone: "warning", title, message }));
@@ -287,14 +429,6 @@ export default function AdminCellDetailPage() {
             </span>
           </div>
           </div>
-          <Button
-            variant="ghost"
-            icon="trash-2"
-            onClick={() => setDeleteOpen(true)}
-            style={{ color: "#fff", background: "rgba(220,38,38,0.18)", borderColor: "rgba(220,38,38,0.4)" }}
-          >
-            Delete cell
-          </Button>
         </div>
       </div>
 
@@ -334,11 +468,10 @@ export default function AdminCellDetailPage() {
           <Icon name="info" size={18} />
         </div>
         <div className="b-body">
-          <b>How ownership transfer works.</b> Reassigning a Cell Leader or G12 will{" "}
-          <b>demote the previous owner to a regular Member</b> of the same cell — they
-          keep their seat in the group but lose Leader / G12 privileges org-wide and
-          can no longer create or edit cells. The role-mutation backend isn&apos;t wired
-          yet; this dialog is UI only.
+          <b>How ownership transfer works.</b> The new owner is notified by email + in-app
+          message. The <b>previous owner stays as a regular member of this cell</b> but
+          keeps their Leader / G12 role org-wide. To revoke their role across the
+          platform, demote them separately from the Users page.
         </div>
       </div>
 
@@ -352,15 +485,23 @@ export default function AdminCellDetailPage() {
         onConfirm={handleTransfer}
       />
 
+      {/* Auto-prompt to demote the previous owner if they no longer hold
+          any cells in this role. Calls POST /users/:uid/demote (spec §4.10).
+          Skipped automatically if the previous owner still leads other cells. */}
       <ConfirmDialog
-        open={deleteOpen}
-        title={`Delete ${cell.name}?`}
-        message="This permanently removes the cell, its members, and all its reports. This action cannot be undone."
-        confirmLabel={deleting ? "Deleting…" : "Yes, delete"}
+        open={demotePrompt?.open ?? false}
+        title={demotePrompt
+          ? `Also demote ${demotePrompt.name} to Member?`
+          : ""}
+        message={demotePrompt
+          ? `${demotePrompt.name} no longer holds any ${demotePrompt.role === "g12" ? "G12" : "Leader"} cells. Removing their ${demotePrompt.role === "g12" ? "G12" : "Leader"} role org-wide will revoke their privileges across the platform. They'll keep their Member access and stay in this cell. You can promote them again later if needed.`
+          : ""}
+        confirmLabel={demoting ? "Demoting…" : "Yes, demote"}
         destructive
-        onConfirm={handleDeleteCell}
-        onCancel={() => (deleting ? null : setDeleteOpen(false))}
+        onConfirm={handleConfirmDemote}
+        onCancel={() => (demoting ? null : setDemotePrompt(null))}
       />
+
     </div>
   );
 }
@@ -522,27 +663,37 @@ function TransferOwnershipDialog({
   const otherCells = kind === "leader" ? otherLeaderCells : otherG12Cells;
   const currentOwnerName = kind === "leader" ? currentCell.leaderName : currentCell.g12LeaderName;
 
-  // User search — uses the spec'd query shape `?role=…&name=…` (singular).
-  // Case fan-out covers lowercase-typed queries since `name` is a
-  // case-sensitive prefix match.
+  // User search per V2 spec §4.1: `GET /users?role=<role>&name=<prefix>`.
+  // `role` is singular. `name` is a case-sensitive prefix on `firstName`
+  // — so we fan out both as-typed AND Title-Cased terms to catch
+  // "nadun" matching "Nadun". When `name` is omitted the endpoint returns
+  // the first page of users with that role; we use this to preload a list
+  // as soon as the dialog opens so the operator has candidates without
+  // typing.
   useEffect(() => {
-    if (!open) return;
-    const term = q.trim();
-    if (term.length < 2 || picked) { setResults([]); return; }
+    if (!open || picked) return;
     let cancelled = false;
     setSearching(true);
+    // Debounce typing; preload (empty q) fires immediately.
+    const term = q.trim();
+    const delay = term.length === 0 ? 0 : 250;
     const timer = setTimeout(async () => {
       try {
-        const titleCase = term.charAt(0).toUpperCase() + term.slice(1).toLowerCase();
-        const variants = Array.from(new Set([term, titleCase]));
+        // Build the variant set. Empty term → one call without `name`.
+        const variants: (string | null)[] =
+          term.length === 0
+            ? [null]
+            : Array.from(new Set([term, term.charAt(0).toUpperCase() + term.slice(1).toLowerCase()]));
+
         const responses = await Promise.all(
-          variants.map((v) =>
-            apiRequest<unknown>(
-              `/users?${new URLSearchParams({ role: kind, name: v, limit: "20" })}`,
-            ).catch(() => null),
-          ),
+          variants.map((v) => {
+            const qs = new URLSearchParams({ role: kind, limit: "20" });
+            if (v) qs.set("name", v);
+            return apiRequest<unknown>(`/users?${qs}`).catch(() => null);
+          }),
         );
         if (cancelled) return;
+
         const seen = new Set<string>();
         const merged: DirectoryUser[] = [];
         for (const res of responses) {
@@ -558,8 +709,11 @@ function TransferOwnershipDialog({
             const u = it as Record<string, unknown>;
             const uid = String(u.uid ?? u.id ?? "");
             if (!uid || seen.has(uid)) continue;
+            // Tolerate both V1 scalar `role` and V2 plural `roles[]`.
             const roles = Array.isArray(u.roles) ? (u.roles as string[]) : [];
-            if (!roles.includes(kind)) continue;
+            const scalarRole = typeof u.role === "string" ? u.role : null;
+            const holdsRole = roles.includes(kind) || scalarRole === kind;
+            if (!holdsRole) continue;
             seen.add(uid);
             merged.push({
               uid,
@@ -567,7 +721,7 @@ function TransferOwnershipDialog({
               lastName:  typeof u.lastName  === "string" ? u.lastName  : undefined,
               email:     typeof u.email     === "string" ? u.email     : undefined,
               profilePhotoUrl: typeof u.profilePhotoUrl === "string" ? u.profilePhotoUrl : null,
-              roles,
+              roles: roles.length > 0 ? roles : (scalarRole ? [scalarRole] : []),
             });
           }
         }
@@ -578,7 +732,7 @@ function TransferOwnershipDialog({
       } finally {
         if (!cancelled) setSearching(false);
       }
-    }, 250);
+    }, delay);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [q, kind, open, picked]);
 
@@ -751,11 +905,17 @@ function TransferOwnershipDialog({
                 }}
               >
                 {searching && <DialogInfo>Searching…</DialogInfo>}
-                {!searching && q.trim().length < 2 && (
-                  <DialogInfo>Type at least 2 characters to search.</DialogInfo>
+                {!searching && results.length === 0 && q.trim().length === 0 && (
+                  <DialogInfo>
+                    No {kind === "g12" ? "G12 supervisors" : "cell leaders"} found.
+                    {kind === "leader" ? " Promote a Member to Leader first." : " Promote a Leader to G12 first."}
+                  </DialogInfo>
                 )}
-                {!searching && q.trim().length >= 2 && results.length === 0 && (
-                  <DialogInfo>No matches.</DialogInfo>
+                {!searching && results.length === 0 && q.trim().length > 0 && (
+                  <DialogInfo>
+                    No matches for &ldquo;{q}&rdquo;. Try the first name only — search matches the
+                    start of a person&apos;s first name (case-sensitive).
+                  </DialogInfo>
                 )}
                 {results.map((u) => (
                   <button

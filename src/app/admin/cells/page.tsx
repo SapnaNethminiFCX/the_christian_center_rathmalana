@@ -64,15 +64,59 @@ export default function AdminCellsPage() {
   // Local override so the table reflects in-memory transfers without
   // waiting on a backend refetch (the API isn't wired yet anyway).
   const [overrides, setOverrides] = useState<Record<string, Partial<Cell>>>({});
+
+  // GET /cells per V2 §13.1 SHOULD return leaderName / g12LeaderName, but
+  // the current backend response only has UIDs. Enrich client-side by
+  // fetching each unique uid via GET /users/:uid, then cache the result.
+  // Doing this here keeps the cells page's display correct without
+  // depending on the backend fix.
+  const [namesByUid, setNamesByUid] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (rawCells.length === 0) return;
+    const uids = new Set<string>();
+    for (const c of rawCells) {
+      if (c.leaderUid && !c.leaderName && !namesByUid[c.leaderUid]) uids.add(c.leaderUid);
+      if (c.g12LeaderUid && !c.g12LeaderName && !namesByUid[c.g12LeaderUid]) uids.add(c.g12LeaderUid);
+    }
+    if (uids.size === 0) return;
+    let cancelled = false;
+    (async () => {
+      const next: Record<string, string> = {};
+      await Promise.allSettled(
+        Array.from(uids).map(async (uid) => {
+          try {
+            const u = await apiRequest<{ firstName?: string; lastName?: string; email?: string }>(
+              `/users/${uid}`,
+            );
+            const composed = [u.firstName, u.lastName].filter(Boolean).join(" ").trim();
+            const display = composed || u.email || "";
+            if (display) next[uid] = display;
+          } catch {
+            /* ignore — falls back to the truncated UID */
+          }
+        }),
+      );
+      if (!cancelled && Object.keys(next).length > 0) {
+        setNamesByUid((prev) => ({ ...prev, ...next }));
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawCells]);
+
   const cells: Cell[] = useMemo(
-    () => rawCells.map((c) => ({ ...c, ...(overrides[c.id] ?? {}) })),
-    [rawCells, overrides],
+    () => rawCells.map((c) => {
+      const fromOverride = overrides[c.id] ?? {};
+      const leaderName    = c.leaderName    ?? fromOverride.leaderName    ?? (c.leaderUid    ? namesByUid[c.leaderUid]    : undefined);
+      const g12LeaderName = c.g12LeaderName ?? fromOverride.g12LeaderName ?? (c.g12LeaderUid ? namesByUid[c.g12LeaderUid] : undefined);
+      return { ...c, ...fromOverride, leaderName, g12LeaderName };
+    }),
+    [rawCells, overrides, namesByUid],
   );
 
   const [search, setSearch] = useState("");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
-  const [transferOpen, setTransferOpen] = useState(false);
 
   useEffect(() => { setPage(0); }, [search]);
 
@@ -96,63 +140,6 @@ export default function AdminCellsPage() {
   const safePage = Math.min(page, totalPages - 1);
   const pageRows = filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
 
-  const allOnPageSelected = pageRows.length > 0 && pageRows.every((c) => selected.has(c.id));
-  const someOnPageSelected = pageRows.some((c) => selected.has(c.id));
-
-  const toggleRow = (id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const togglePage = () => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (allOnPageSelected) {
-        for (const c of pageRows) next.delete(c.id);
-      } else {
-        for (const c of pageRows) next.add(c.id);
-      }
-      return next;
-    });
-  };
-
-  const selectAllFiltered = () => {
-    setSelected(new Set(filtered.map((c) => c.id)));
-  };
-
-  const clearSelection = () => setSelected(new Set());
-
-  const onTransferConfirmed = (target: DirectoryUser, kind: "leader" | "g12") => {
-    // Apply the transfer locally for every selected cell. When the API
-    // ships, replace this with PATCH /cells/:id { leaderUid | g12LeaderUid }
-    // and refetch.
-    setOverrides((prev) => {
-      const next = { ...prev };
-      for (const id of selected) {
-        next[id] = {
-          ...(next[id] ?? {}),
-          ...(kind === "leader"
-            ? { leaderUid: target.uid, leaderName: fullName(target) }
-            : { g12LeaderUid: target.uid, g12LeaderName: fullName(target) }),
-        };
-      }
-      return next;
-    });
-    dispatch(
-      pushToast({
-        tone: "success",
-        title: `${selected.size} cell${selected.size === 1 ? "" : "s"} transferred`,
-        message: `New ${kind === "g12" ? "G12 Leader" : "Cell Leader"}: ${fullName(target)}. Previous holder is demoted to Member and stays in the cell. (UI only — backend pending.)`,
-      }),
-    );
-    clearSelection();
-    setTransferOpen(false);
-  };
-
   return (
     <div className="page">
       <div className="page-header">
@@ -161,7 +148,7 @@ export default function AdminCellsPage() {
           <div className="greeting">
             <b style={{ color: "var(--color-primary)" }}>{loading ? "…" : filtered.length}</b>{" "}
             cell{filtered.length === 1 ? "" : "s"} matching your filter.{" "}
-            Select one or more to transfer ownership to another Leader or G12.
+            Open a cell to view details or transfer ownership.
           </div>
         </div>
         <Button variant="secondary" icon="refresh-cw" onClick={refetch}>Refresh</Button>
@@ -179,55 +166,9 @@ export default function AdminCellsPage() {
         </div>
       </div>
 
-      {/* Selection bar — sticky-ish floating panel above the table */}
-      {selected.size > 0 && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            padding: "12px 16px",
-            marginBottom: 14,
-            background: "rgba(188,233,85,0.14)",
-            border: "1px solid var(--color-accent)",
-            borderRadius: 12,
-            flexWrap: "wrap",
-          }}
-        >
-          <Icon name="check-circle" size={16} style={{ color: "var(--color-success-deep)" }} />
-          <span style={{ fontFamily: "var(--font-body)", fontWeight: 600, fontSize: 14, color: "var(--color-primary)" }}>
-            {selected.size} cell{selected.size === 1 ? "" : "s"} selected
-          </span>
-          {selected.size < filtered.length && (
-            <button
-              type="button"
-              onClick={selectAllFiltered}
-              style={{
-                background: "transparent",
-                border: 0,
-                color: "var(--color-primary)",
-                fontFamily: "var(--font-body)",
-                fontSize: 13,
-                textDecoration: "underline",
-                cursor: "pointer",
-              }}
-            >
-              Select all {filtered.length} filtered
-            </button>
-          )}
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <Button size="sm" variant="ghost" onClick={clearSelection}>Clear</Button>
-            <Button size="sm" icon="share-2" onClick={() => setTransferOpen(true)}>
-              Transfer ownership
-            </Button>
-          </div>
-        </div>
-      )}
-
       <div className="tbl-card">
         <table className="tbl" style={{ tableLayout: "fixed", width: "100%" }}>
           <colgroup>
-            <col style={{ width: 42 }} />
             <col style={{ width: "26%" }} />
             <col style={{ width: "18%" }} />
             <col style={{ width: "18%" }} />
@@ -237,15 +178,6 @@ export default function AdminCellsPage() {
           </colgroup>
           <thead>
             <tr>
-              <th>
-                <input
-                  type="checkbox"
-                  checked={allOnPageSelected}
-                  ref={(el) => { if (el) el.indeterminate = !allOnPageSelected && someOnPageSelected; }}
-                  onChange={togglePage}
-                  aria-label="Select all on this page"
-                />
-              </th>
               <th>Cell</th>
               <th>Leader</th>
               <th>G12 Leader</th>
@@ -257,7 +189,7 @@ export default function AdminCellsPage() {
           <tbody>
             {loading && pageRows.length === 0 && (
               <tr>
-                <td colSpan={7} style={{ textAlign: "center", padding: 40 }}>
+                <td colSpan={6} style={{ textAlign: "center", padding: 40 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, color: "var(--color-muted)" }}>
                     <Icon name="loader" size={18} />
                     <span style={{ fontFamily: "var(--font-body)", fontSize: 14 }}>Loading…</span>
@@ -267,7 +199,7 @@ export default function AdminCellsPage() {
             )}
             {!loading && pageRows.length === 0 && (
               <tr>
-                <td colSpan={7}>
+                <td colSpan={6}>
                   <div className="empty">
                     <h3>No cells found</h3>
                     <p>{search ? "Try a different search term." : "No active cells in the directory yet."}</p>
@@ -276,17 +208,8 @@ export default function AdminCellsPage() {
               </tr>
             )}
             {pageRows.map((c) => {
-              const isSelected = selected.has(c.id);
               return (
-                <tr key={c.id} style={isSelected ? { background: "rgba(188,233,85,0.08)" } : undefined}>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggleRow(c.id)}
-                      aria-label={`Select ${c.name}`}
-                    />
-                  </td>
+                <tr key={c.id}>
                   <td>
                     <div style={{ fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                       {c.name}
@@ -366,13 +289,6 @@ export default function AdminCellsPage() {
         )}
       </div>
 
-      <TransferOwnershipDialog
-        open={transferOpen}
-        selectedCount={selected.size}
-        selectedCells={cells.filter((c) => selected.has(c.id))}
-        onCancel={() => setTransferOpen(false)}
-        onConfirm={onTransferConfirmed}
-      />
     </div>
   );
 }
