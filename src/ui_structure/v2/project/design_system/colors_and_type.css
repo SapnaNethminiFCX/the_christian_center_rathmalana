@@ -1,0 +1,161 @@
+/* =========================================================================
+   EduPath — Course Management Portal
+   Visual foundations: color, type, spacing, radii, shadow, motion.
+
+   Source: CMP Design System v1.0.0 (Future CX Lanka).
+   Use these tokens directly, or import once and theme with the
+   semantic helpers further down.
+   ========================================================================= */
+
+@import url("https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+:root {
+  /* ── Brand ─────────────────────────────────────────────────────────── */
+  --color-primary:        #152A24;   /* Dark forest green — sidebars, dark hero, primary text */
+  --color-primary-2:      #1F3626;   /* Slightly lighter dark — alternate dark sections / CTA blocks */
+  --color-accent:         #BCE955;   /* Lime green — the SINGLE action colour. CTAs, active states */
+  --color-accent-hover:   #A8D43D;   /* Darker lime for primary button hover */
+  --color-body-green:     #41574A;   /* Body text on light backgrounds, subheadings */
+
+  /* ── Neutrals ──────────────────────────────────────────────────────── */
+  --color-black:          #000000;
+  --color-white:          #FFFFFF;
+  --color-page-bg:        #FAFAFA;   /* Default page background */
+  --color-surface:        #FFFFFF;   /* Card / modal surfaces */
+  --color-surface-2:      #FAFAFA;   /* Alternating surface, table zebra */
+  --color-stroke:         #E5E5E5;   /* Card borders, input borders, dividers */
+  --color-stroke-2:       #F6F6F6;   /* Subtle dividers */
+  --color-light-gray:     #EEF1EF;   /* Tag/badge bg, icon containers, table hover */
+  --color-muted:          #A0ACA6;   /* Placeholder, helper, timestamps */
+
+  /* ── Semantic ─────────────────────────────────────────────────────── */
+  --color-success:        #3DB55F;
+  --color-success-deep:   #15803D;
+  --color-success-bg:     #ECFDF0;
+  --color-warning:        #D97706;
+  --color-warning-bg:     #FEF9EC;
+  --color-error:          #DC2626;
+  --color-error-deep:     #B91C1C;
+  --color-error-bg:       #FEF2F2;
+  --color-info:           #0891B2;
+  --color-info-bg:        #F0FAFF;
+  --color-archive:        #6B7280;
+  --color-archive-bg:     #F3F4F6;
+  --color-progress:       #1D4ED8;
+  --color-progress-bg:    #EFF6FF;
+
+  /* ── On-dark text ─────────────────────────────────────────────────── */
+  --on-dark-primary:      rgba(255, 255, 255, 1);
+  --on-dark-secondary:    rgba(255, 255, 255, 0.80);
+  --on-dark-muted:        rgba(255, 255, 255, 0.60);
+  --on-dark-faint:        rgba(255, 255, 255, 0.40);
+  --on-dark-stroke:       rgba(255, 255, 255, 0.10);
+  --on-dark-tint-accent:  rgba(188, 233, 85, 0.15);
+
+  /* ── Typography ───────────────────────────────────────────────────── */
+  --font-heading:         "Figtree", system-ui, sans-serif;
+  --font-body:            "Inter", system-ui, sans-serif;
+  --font-mono:            "JetBrains Mono", "Fira Code", monospace;
+
+  /* heading scale (Figtree, 1.1 line-height) */
+  --fs-h1: 64px;   --lh-h1: 70.4px;   --fw-h1: 700;
+  --fs-h2: 56px;   --lh-h2: 61.6px;   --fw-h2: 700;
+  --fs-h3: 48px;   --lh-h3: 52.8px;   --fw-h3: 600;
+  --fs-h4: 40px;   --lh-h4: 44px;     --fw-h4: 600;
+  --fs-h5: 32px;   --lh-h5: 35.2px;   --fw-h5: 600;
+  --fs-h6: 24px;   --lh-h6: 26.4px;   --fw-h6: 600;
+  --fs-h7: 20px;   --lh-h7: 22px;     --fw-h7: 600;
+
+  /* body scale (Inter, 1.4 line-height) */
+  --fs-lg:     20px;   --lh-lg:     28px;
+  --fs-md:     18px;   --lh-md:     25.2px;
+  --fs-base:   16px;   --lh-base:   22.4px;
+  --fs-sm:     14px;   --lh-sm:     19.6px;
+  --fs-xs:     12px;   --lh-xs:     16.8px;
+
+  /* ── Spacing (4px base) ───────────────────────────────────────────── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+
+  /* ── Radius ───────────────────────────────────────────────────────── */
+  --radius-sm:   6px;     /* tags, badges */
+  --radius-md:   10px;    /* inputs, small cards */
+  --radius-lg:   14px;    /* standard cards */
+  --radius-xl:   20px;    /* large cards, course cards */
+  --radius-2xl:  24px;    /* hero image frames, modals, testimonial cards */
+  --radius-full: 9999px;  /* pill buttons, avatars, nav pill */
+
+  /* ── Shadow ───────────────────────────────────────────────────────── */
+  --shadow-xs:    0 1px 2px 0 rgba(21, 42, 36, 0.05);
+  --shadow-sm:    0 1px 3px 0 rgba(21, 42, 36, 0.08), 0 1px 2px -1px rgba(21, 42, 36, 0.06);
+  --shadow-md:    0 4px 6px -1px rgba(21, 42, 36, 0.08), 0 2px 4px -2px rgba(21, 42, 36, 0.05);
+  --shadow-lg:    0 10px 15px -3px rgba(21, 42, 36, 0.08), 0 4px 6px -4px rgba(21, 42, 36, 0.05);
+  --shadow-xl:    0 20px 25px -5px rgba(21, 42, 36, 0.10), 0 8px 10px -6px rgba(21, 42, 36, 0.06);
+  --shadow-card:  0 2px 8px 0 rgba(21, 42, 36, 0.08);
+  --shadow-modal: 0 25px 50px -12px rgba(21, 42, 36, 0.25);
+
+  /* ── Motion ───────────────────────────────────────────────────────── */
+  --duration-fast:   150ms;
+  --duration-base:   200ms;
+  --duration-slow:   300ms;
+  --duration-slower: 500ms;
+  --ease-default:    ease;
+  --ease-spring:     cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-out:        cubic-bezier(0, 0, 0.2, 1);
+  --ease-in-out:     cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ── Focus ring ───────────────────────────────────────────────────── */
+  --focus-ring: 0 0 0 2px var(--color-accent);
+}
+
+/* =========================================================================
+   Semantic helpers — apply directly to elements / class names.
+   ========================================================================= */
+
+html { font-family: var(--font-body); color: var(--color-primary); background: var(--color-page-bg); }
+
+h1, .h1 { font-family: var(--font-heading); font-size: var(--fs-h1); line-height: var(--lh-h1); font-weight: var(--fw-h1); color: var(--color-primary); letter-spacing: -0.02em; }
+h2, .h2 { font-family: var(--font-heading); font-size: var(--fs-h2); line-height: var(--lh-h2); font-weight: var(--fw-h2); color: var(--color-primary); letter-spacing: -0.02em; }
+h3, .h3 { font-family: var(--font-heading); font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: var(--fw-h3); color: var(--color-primary); letter-spacing: -0.01em; }
+h4, .h4 { font-family: var(--font-heading); font-size: var(--fs-h4); line-height: var(--lh-h4); font-weight: var(--fw-h4); color: var(--color-primary); }
+h5, .h5 { font-family: var(--font-heading); font-size: var(--fs-h5); line-height: var(--lh-h5); font-weight: var(--fw-h5); color: var(--color-primary); }
+h6, .h6 { font-family: var(--font-heading); font-size: var(--fs-h6); line-height: var(--lh-h6); font-weight: var(--fw-h6); color: var(--color-primary); }
+.h7    { font-family: var(--font-heading); font-size: var(--fs-h7); line-height: var(--lh-h7); font-weight: var(--fw-h7); color: var(--color-primary); }
+
+p, .body, .body-base { font-family: var(--font-body); font-size: var(--fs-base); line-height: var(--lh-base); color: var(--color-body-green); }
+.body-lg  { font-family: var(--font-body); font-size: var(--fs-lg); line-height: var(--lh-lg); color: var(--color-body-green); }
+.body-md  { font-family: var(--font-body); font-size: var(--fs-md); line-height: var(--lh-md); color: var(--color-body-green); }
+.body-sm  { font-family: var(--font-body); font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--color-body-green); }
+.body-xs  { font-family: var(--font-body); font-size: var(--fs-xs); line-height: var(--lh-xs); color: var(--color-body-green); }
+code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+
+.eyebrow {
+  display: inline-block;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1;
+  padding: 8px 12px;
+  border-radius: var(--radius-full);
+  background: var(--color-light-gray);
+  color: var(--color-primary);
+  letter-spacing: 0.02em;
+}
+.eyebrow--dark { background: rgba(255,255,255,0.12); color: var(--color-white); }
+
+.accent-word { color: var(--color-accent); }
+
+/* On-dark text helpers for hero/sidebar/footer */
+.on-dark            { color: var(--on-dark-primary); }
+.on-dark-secondary  { color: var(--on-dark-secondary); }
+.on-dark-muted      { color: var(--on-dark-muted); }

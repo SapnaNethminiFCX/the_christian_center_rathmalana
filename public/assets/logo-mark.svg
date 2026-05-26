@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="EduPath">
+  <rect width="48" height="48" rx="12" fill="#152A24"></rect>
+  <g transform="translate(8,12)" fill="#BCE955">
+    <path d="M16 0 L32 6 L16 12 L0 6 Z"></path>
+    <path d="M6 9 L6 16 C6 19 10 21 16 21 C22 21 26 19 26 16 L26 9 L16 13 Z"></path>
+    <path d="M30 7 L30 17" stroke="#BCE955" stroke-width="1.5" stroke-linecap="round" fill="none"></path>
+    <circle cx="30" cy="18" r="1.5"></circle>
+  </g>
+</svg>

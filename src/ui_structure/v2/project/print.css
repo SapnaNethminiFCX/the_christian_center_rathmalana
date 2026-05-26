@@ -1,0 +1,70 @@
+/* Print-only styles: each .print-page is a landscape page-sized canvas
+   sized to 1440x900 (16:10) and break-after: page so PDFs land one
+   screen per page. Screen content is rendered at native size. */
+
+@page {
+  size: 1440px 900px;
+  margin: 0;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #f3f1ec;
+}
+
+.print-deck {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  padding: 24px 0;
+}
+
+.print-page {
+  width: 1440px;
+  height: 900px;
+  background: var(--surface, #ffffff);
+  position: relative;
+  overflow: hidden;
+  break-after: page;
+  page-break-after: always;
+  box-shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+.print-page:last-child { break-after: auto; page-break-after: auto; }
+
+.print-page__inner {
+  width: 1440px;
+  height: 900px;
+  overflow: hidden;
+}
+
+.print-label {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  font: 500 11px/1 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  color: rgba(0,0,0,.45);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  background: rgba(255,255,255,.7);
+  padding: 6px 10px;
+  border-radius: 999px;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* Hide interactive widgets that don't make sense on paper. */
+.view-switcher,
+.tweak-panel,
+.toast { display: none !important; }
+
+/* Make any internal scroll regions show all their content. */
+* { animation: none !important; transition: none !important; }
+
+@media print {
+  html, body { background: white; }
+  .print-deck { gap: 0; padding: 0; }
+  .print-page { box-shadow: none; }
+  .print-label { display: none; }
+}
