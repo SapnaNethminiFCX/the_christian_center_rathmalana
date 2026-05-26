@@ -10,7 +10,6 @@ import { useCells } from "@/application/hooks/useCells";
 import {
   useCellsWeekly,
   useAttendance,
-  useMeetingTypes,
 } from "@/application/hooks/useAnalytics";
 import { useReportAggregates } from "@/application/hooks/useReportAggregates";
 
@@ -26,27 +25,6 @@ function weekLabel(w: unknown): string {
   return w.length >= 3 ? w.slice(-3) : w;
 }
 
-const KNOWN_CELL_TYPES = new Set(["g12", "care", "children", "outreach"]);
-
-function toMeetingTypeArray(d: unknown): Array<{ type: string; count: number }> {
-  if (Array.isArray(d)) return d as Array<{ type: string; count: number }>;
-  if (d && typeof d === "object") {
-    const obj = d as Record<string, unknown>;
-    // Backend envelope: { scope, period, breakdown: { care: N, ... } }
-    if (obj.breakdown && typeof obj.breakdown === "object") {
-      return toMeetingTypeArray(obj.breakdown);
-    }
-    // Raw object map { care: N, outreach: N } — only accept if keys look like cell types.
-    const entries = Object.entries(obj).filter(([k]) => KNOWN_CELL_TYPES.has(k));
-    if (entries.length === 0) return [];
-    return entries.map(([type, count]) => ({
-      type,
-      count: typeof count === "number" ? count : Number(count) || 0,
-    }));
-  }
-  return [];
-}
-
 /**
  * G12 Dashboard — "Network overview". All numbers derived from real API:
  *   - /cells (G12 backend-scoped to their network) → cell count + leader count
@@ -55,48 +33,65 @@ function toMeetingTypeArray(d: unknown): Array<{ type: string; count: number }> 
  *   - /analytics/meeting-types → by-cell-type donut
  */
 export default function G12DashboardPage() {
-  const { cells, loading: cellsLoading } = useCells();
+  // Per V2 spec §13.1, calling GET /cells without a scope param auto-applies
+  // the G12 network scope server-side — that's the source of truth for
+  // "cells in my network". Avoids the prior approach of fetching org-wide
+  // and filtering on g12LeaderUid (fragile if backend doesn't populate it).
+  const { cells: networkCells, loading: cellsLoading } = useCells({ state: "active" });
   const cellsWeekly = useCellsWeekly({ weeks: 8 });
   const attendance = useAttendance();
-  const meetingTypes = useMeetingTypes();
-  // Fallback aggregates computed from real cell reports across the network.
-  const aggregates = useReportAggregates(cells, { weeks: 8 });
+
+  const aggregates = useReportAggregates(networkCells, { weeks: 8 });
 
   const leadersInNetwork = useMemo(
-    () => new Set((cells ?? []).map((c) => c.leaderUid).filter(Boolean)).size,
-    [cells],
+    () => new Set(networkCells.map((c) => c.leaderUid).filter(Boolean)).size,
+    [networkCells],
   );
-  const cellsInNetwork = cells?.length ?? 0;
+  const cellsInNetwork = networkCells.length;
 
   // Total reports filed across the network — sourced from each cell's
   // `reportCount` field (populated by the backend on /cells). Falls back to
   // the analytics endpoint if cells haven't loaded yet.
   const totalReports = useMemo(() => {
-    const fromCells = (cells ?? []).reduce((s, c) => s + (c.reportCount ?? 0), 0);
+    const fromCells = networkCells.reduce((s, c) => s + (c.reportCount ?? 0), 0);
     if (fromCells > 0) return fromCells;
     return (Array.isArray(cellsWeekly.data) ? cellsWeekly.data : []).reduce((s, p) => s + (p?.reports ?? 0), 0);
-  }, [cells, cellsWeekly.data]);
+  }, [networkCells, cellsWeekly.data]);
 
   const weeklyBars = useMemo(() => {
     const fromApi = Array.isArray(attendance.data) ? attendance.data : [];
     const apiTotal = fromApi.reduce((s, x) => s + (x?.present ?? 0) + (x?.absent ?? 0), 0);
-    const source = apiTotal > 0 ? fromApi : aggregates.weekly;
-    return source.slice(-8).map((p) => ({ label: weekLabel(p?.week), value: p?.present ?? 0 }));
-  }, [attendance.data, aggregates.weekly]);
-
-  const typeSlices = useMemo(() => {
-    const fromApi = toMeetingTypeArray(meetingTypes.data);
-    const apiTotal = fromApi.reduce((s, x) => s + (x.count ?? 0), 0);
-    // Fall back to real cell-report aggregates when API has no data OR when
-    // every slice is zero (common when backend ships the response shape but
-    // the aggregation hasn't been wired yet).
-    const source = apiTotal > 0 ? fromApi : aggregates.meetingTypes;
-    return source.map((s) => ({
-      label: s?.type ?? "unknown",
-      value: s?.count ?? 0,
-      color: TYPE_COLORS[s?.type ?? ""] ?? "#999",
+    if (apiTotal > 0) {
+      return fromApi.slice(-8).map((p) => ({ label: weekLabel(p?.week), value: p?.present ?? 0 }));
+    }
+    const weeklyTotal = aggregates.weekly.reduce((s, p) => s + (p?.present ?? 0), 0);
+    if (weeklyTotal > 0) {
+      return aggregates.weekly.slice(-8).map((p) => ({ label: weekLabel(p?.week), value: p?.present ?? 0 }));
+    }
+    // Per-cell fallback so a G12 with cells but no attendance recorded still
+    // sees something meaningful in the bar chart.
+    return networkCells.map((c) => ({
+      label: c.name.length > 10 ? `${c.name.slice(0, 9)}…` : c.name,
+      value: c.memberCount ?? 0,
     }));
-  }, [meetingTypes.data, aggregates.meetingTypes]);
+  }, [attendance.data, aggregates.weekly, networkCells]);
+
+  // Count cells in the network by type so the donut matches "Cells in network"
+  // KPI even before any reports are filed. Backend `/analytics/meeting-types`
+  // is reports-by-type, which under-represents fresh cells; reserve it for
+  // post-launch when reporting data is dense.
+  const typeSlices = useMemo(() => {
+    const typeMap = new Map<string, number>();
+    for (const c of networkCells) {
+      const t = c.type ?? "unknown";
+      typeMap.set(t, (typeMap.get(t) ?? 0) + 1);
+    }
+    return Array.from(typeMap.entries()).map(([type, count]) => ({
+      label: type,
+      value: count,
+      color: TYPE_COLORS[type] ?? "#999",
+    }));
+  }, [networkCells]);
 
   return (
     <div className="page">
@@ -144,10 +139,10 @@ export default function G12DashboardPage() {
 
         <ChartCard
           title="By cell type"
-          sub="Reports by cell type"
+          sub="Distribution of your network"
           legend={typeSlices.map((s) => ({ label: s.label, color: s.color }))}
         >
-          {(meetingTypes.loading || aggregates.loading) && typeSlices.length === 0 ? <EmptyChart message="Loading…" /> :
+          {cellsLoading && typeSlices.length === 0 ? <EmptyChart message="Loading…" /> :
             typeSlices.length === 0 ? <EmptyChart /> :
             <div style={{ display: "flex", justifyContent: "center", padding: "8px 0" }}>
               <MeetingTypeDonut slices={typeSlices} size={200} />

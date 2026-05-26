@@ -116,9 +116,11 @@ export default function CellMembersPage() {
             if (memberUids.has(u.uid)) return false;
             const roles = u.roles ?? [];
             if (roles.includes("admin") || roles.includes("super_admin")) return false;
-            // Defence-in-depth: drop results whose roles don't intersect the
-            // caller's allow-list (when the backend ignored the `roles` param).
-            if (allowed && roles.length > 0 && !roles.some((r) => allowed.has(r))) return false;
+            // Defence-in-depth: drop results that hold ANY role outside the
+            // caller's allow-list. Since every user has `member` as a base
+            // role, checking "any overlap" lets Leaders/G12 through — we
+            // must instead enforce "no extra role beyond what's allowed".
+            if (allowed && roles.length > 0 && roles.some((r) => !allowed.has(r))) return false;
             return true;
           }),
         );

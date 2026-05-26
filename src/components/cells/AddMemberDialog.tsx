@@ -124,12 +124,14 @@ export function AddMemberDialog({ open, existingUids = [], roleFilter, busy, onC
           const roles = u.roles ?? [];
           if (roles.includes("admin") || roles.includes("super_admin")) return false;
           // Defence-in-depth: if the backend ignored ?roles=, still respect
-          // the caller's intent so a Leader never sees a g12 / leader-only
-          // result. Empty/missing role array is allowed through to keep
-          // backward compatibility with legacy member records.
+          // the caller's intent. Every user holds `member` as a base role,
+          // so checking "any overlap" with the allow-list would let Leaders
+          // and G12s slip through — we must reject any user whose roles
+          // include something OUTSIDE the allow-list. Empty/missing role
+          // array is allowed through for legacy member records.
           if (roleFilter && roleFilter.length > 0 && roles.length > 0) {
             const allowed = new Set(roleFilter);
-            if (!roles.some((r) => allowed.has(r))) return false;
+            if (roles.some((r) => !allowed.has(r))) return false;
           }
           return true;
         });

@@ -15,6 +15,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useCell, useCellMembers } from "@/application/hooks/useCell";
 import { useCellReports } from "@/application/hooks/useCellReports";
 import { useAppSelector } from "@/application/hooks/useAppSelector";
+import { useCellMutations, canDeleteCell } from "@/application/hooks/useCells";
 import { cellMemberSearchRoles } from "@/lib/cellMemberSearchRoles";
 
 export default function LeaderCellDetailPage() {
@@ -27,10 +28,25 @@ export default function LeaderCellDetailPage() {
 
   const user = useAppSelector((s) => s.session.user);
   const canFile = (user?.roles?.includes("leader") || user?.roles?.includes("g12") || user?.roles?.includes("super_admin")) ?? false;
+  const canDelete = canDeleteCell(cell, user);
+  const { deleteCell: deleteCellApi } = useCellMutations();
+  const [deleting, setDeleting] = useState(false);
 
   const [tab, setTab] = useState<"members" | "reports">("members");
   const [addOpen, setAddOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<{ uid: string; name: string } | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
+  const handleDeleteCell = async () => {
+    if (!cell) return;
+    setDeleting(true);
+    const ok = await deleteCellApi(cell.id);
+    setDeleting(false);
+    if (ok) {
+      setDeleteOpen(false);
+      router.push("/cells");
+    }
+  };
 
   const handleAddMembers = async (uids: string[]) => {
     const res = await addMembers(uids);
@@ -78,6 +94,17 @@ export default function LeaderCellDetailPage() {
             <Button size="lg" variant="secondary-light" icon="edit-3" onClick={() => router.push(`/cells/${cell.id}/edit`)}>
               Edit cell
             </Button>
+            {canDelete && (
+              <Button
+                size="lg"
+                variant="ghost"
+                icon="trash-2"
+                onClick={() => setDeleteOpen(true)}
+                style={{ color: "var(--color-error)" }}
+              >
+                Delete
+              </Button>
+            )}
           </>
         }
       />
@@ -127,6 +154,16 @@ export default function LeaderCellDetailPage() {
         destructive
         onConfirm={handleRemoveMember}
         onCancel={() => setRemoveTarget(null)}
+      />
+
+      <ConfirmDialog
+        open={deleteOpen}
+        title={`Delete ${cell.name}?`}
+        message="This permanently removes the cell, its members list, and all its reports. This action cannot be undone."
+        confirmLabel={deleting ? "Deleting…" : "Yes, delete"}
+        destructive
+        onConfirm={handleDeleteCell}
+        onCancel={() => (deleting ? null : setDeleteOpen(false))}
       />
 
       {tab === "reports" && (
