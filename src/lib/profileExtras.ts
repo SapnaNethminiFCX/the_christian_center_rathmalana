@@ -16,15 +16,19 @@
  */
 
 export interface Qualification {
-  /** Stable id used as the React key. Generated on add. */
+  /** Stable id used as the React key. Generated on add. Per PATCH /me §3.2
+   *  this is a client-generated UUID the backend stores verbatim. */
   id: string;
   /** Free-text title — e.g. "Bachelor of Theology", "Diploma in Counselling". */
   title: string;
-  /** Filename of the uploaded transcript / certificate (PDF). Optional.
-   *  We only persist the filename — file bytes are not stored in
-   *  localStorage, so the actual document is gone after refresh. When the
-   *  backend gets an upload endpoint, this becomes the storage key / URL. */
-  attachmentName: string | null;
+  /** Backend-returned URL from POST /me/qualification (V2 §3.2). `null`
+   *  when no PDF is attached. Locally-selected files that haven't been
+   *  uploaded yet keep this null and surface the filename via
+   *  `pendingFileName`. */
+  fileUrl: string | null;
+  /** Locally-selected file's name before upload — UI only, not persisted
+   *  on the backend. Cleared once `fileUrl` is set after upload. */
+  pendingFileName?: string | null;
 }
 
 export interface ProfileExtras {
@@ -59,6 +63,15 @@ export function loadProfileExtras(uid: string | null | undefined): ProfileExtras
               typeof (q as Qualification).id === "string" &&
               typeof (q as Qualification).title === "string"
             )
+            // Backwards-compat: older entries used `attachmentName` instead
+            // of `fileUrl`. Normalise on load so the new shape is consistent.
+            .map((q) => {
+              const legacy = q as Qualification & { attachmentName?: string | null };
+              if (q.fileUrl === undefined && legacy.attachmentName !== undefined) {
+                return { id: q.id, title: q.title, fileUrl: null, pendingFileName: legacy.attachmentName };
+              }
+              return { id: q.id, title: q.title, fileUrl: q.fileUrl ?? null, pendingFileName: q.pendingFileName ?? null };
+            })
         : [],
     };
   } catch {

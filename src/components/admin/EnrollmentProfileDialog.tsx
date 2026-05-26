@@ -11,8 +11,24 @@ import {
   loadProfileExtras,
   type ProfileExtras,
 } from "@/lib/profileExtras";
+import { apiRequest, ApiRequestError } from "@/infrastructure/api/request";
 import type { EnrollmentItem } from "@/application/hooks/useAdminEnrollmentQueue";
 import { isApproved, isRejected } from "@/application/hooks/useAdminEnrollmentQueue";
+
+/** Live profile shape returned by GET /users/:uid (spec §3.1 / 4.x). */
+interface LiveUser {
+  uid: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  profilePhotoUrl?: string | null;
+  phoneNumber?: string | null;
+  dateOfBirth?: string | null;
+  gender?: string | null;
+  address?: string | null;
+  qualifications?: { id: string; title: string; fileUrl: string | null }[];
+  qualificationTitle?: string | null;
+}
 
 interface Props {
   enrollment: EnrollmentItem | null;
@@ -85,29 +101,62 @@ function FieldRow({ label, children }: { label: string; children: React.ReactNod
 
 export function EnrollmentProfileDialog({ enrollment, onClose, onApprove, onReject }: Props) {
   const open = !!enrollment;
+  const [live, setLive] = useState<LiveUser | null>(null);
+  const [liveLoading, setLiveLoading] = useState(false);
   const [extras, setExtras] = useState<ProfileExtras>(EMPTY_PROFILE_EXTRAS);
 
-  // Hydrate the local-storage profile extras keyed by the student's uid. In the
-  // current demo this only works when the admin and the student share a
-  // browser (manual role-switching) — once the API exposes these fields the
-  // load call swaps for an apiRequest to /admin/users/:uid/profile-extras.
+  // Fetch the live user profile via GET /users/:uid when the dialog opens —
+  // gives us phoneNumber / DOB / gender / address / qualifications etc. that
+  // the lightweight `enrollment.student` payload from /admin/enrollments
+  // doesn't include.
   useEffect(() => {
-    if (!enrollment) return;
+    if (!enrollment) {
+      setLive(null);
+      setLiveLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLive(null);
+    setLiveLoading(true);
+    apiRequest<LiveUser>(`/users/${enrollment.studentUid}`)
+      .then((u) => { if (!cancelled) setLive(u); })
+      .catch((err) => {
+        // 401 means session is dead — handled globally. For others, fall back
+        // to the lightweight student data already on the enrollment row.
+        if (cancelled) return;
+        if (err instanceof ApiRequestError && err.status === 401) return;
+      })
+      .finally(() => { if (!cancelled) setLiveLoading(false); });
+    // Local storage fallback for qualifications stays in case the backend
+    // returns no array yet (admin demoing on the same browser as the student).
     setExtras(loadProfileExtras(enrollment.studentUid));
+    return () => { cancelled = true; };
   }, [enrollment]);
 
   if (!open || !enrollment) return null;
 
+  // Prefer live (fresh GET /users/:uid) over enrollment.student (lightweight
+  // row data). Each field falls back to whatever's available.
   const student = enrollment.student;
-  const fullName = student
-    ? `${student.firstName ?? ""} ${student.lastName ?? ""}`.trim() || student.uid
-    : enrollment.studentUid;
+  const fullName = `${live?.firstName ?? student?.firstName ?? ""} ${live?.lastName ?? student?.lastName ?? ""}`.trim()
+    || live?.uid
+    || enrollment.studentUid;
+  const email          = live?.email          ?? student?.email          ?? null;
+  const photo          = live?.profilePhotoUrl ?? student?.profilePhotoUrl ?? undefined;
+  const phoneNumber    = live?.phoneNumber    ?? (student as { phoneNumber?: string | null } | undefined)?.phoneNumber  ?? null;
+  const address        = live?.address        ?? (student as { address?: string | null }     | undefined)?.address      ?? null;
+  const dateOfBirth    = live?.dateOfBirth    ?? (student as { dateOfBirth?: string | null } | undefined)?.dateOfBirth   ?? null;
+  const gender         = live?.gender         ?? (student as { gender?: string | null }      | undefined)?.gender        ?? null;
+  const qualificationTitleFallback = live?.qualificationTitle ?? (student as { qualificationTitle?: string | null } | undefined)?.qualificationTitle ?? null;
 
   const pending = !isApproved(enrollment.state) && !isRejected(enrollment.state);
-  // Show qualifications the student saved in their own browser. Cross-device
-  // limitation persists until the backend exposes a stored qualifications
-  // array — see profileExtras.ts comments.
-  const filledQuals = extras.qualifications.filter((q) => q.title.trim());
+
+  // Prefer the backend's qualifications array (post-V2 PATCH /me §3.2). Fall
+  // back to localStorage extras only if backend didn't return any — keeps the
+  // demo path working when the admin and student share a browser.
+  const filledQuals = (live?.qualifications && live.qualifications.length > 0)
+    ? live.qualifications.filter((q) => q.title?.trim())
+    : extras.qualifications.filter((q) => q.title.trim());
 
   return (
     <Modal open={open} onClose={onClose}>
@@ -122,14 +171,10 @@ export function EnrollmentProfileDialog({ enrollment, onClose, onApprove, onReje
       >
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
-          <Avatar
-            size="lg"
-            name={fullName}
-            src={student?.profilePhotoUrl ?? undefined}
-          />
+          <Avatar size="lg" name={fullName} src={photo ?? undefined} />
           <div style={{ flex: 1, minWidth: 0 }}>
             <h2 style={{ margin: 0, textAlign: "left" }}>{fullName}</h2>
-            {student?.email && (
+            {email && (
               <div
                 style={{
                   fontFamily: "var(--font-body)",
@@ -138,7 +183,13 @@ export function EnrollmentProfileDialog({ enrollment, onClose, onApprove, onReje
                   marginTop: 2,
                 }}
               >
-                {student.email}
+                {email}
+              </div>
+            )}
+            {liveLoading && (
+              <div style={{ fontFamily: "var(--font-body)", fontSize: 11, color: "var(--color-muted)", marginTop: 4, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <Icon name="loader" size={11} />
+                Loading live profile…
               </div>
             )}
           </div>
@@ -197,27 +248,19 @@ export function EnrollmentProfileDialog({ enrollment, onClose, onApprove, onReje
         {/* Contact details */}
         <SectionTitle>Contact details</SectionTitle>
         <FieldRow label="Full name">{fullName}</FieldRow>
-        <FieldRow label="Email">{student?.email ?? <NotProvided />}</FieldRow>
-        <FieldRow label="Phone number">
-          {(enrollment.student as { phoneNumber?: string } | undefined)?.phoneNumber ?? <NotProvided />}
-        </FieldRow>
-        <FieldRow label="Address">
-          {(enrollment.student as { address?: string | null } | undefined)?.address?.trim() ?? <NotProvided />}
-        </FieldRow>
+        <FieldRow label="Email">{email ?? <NotProvided />}</FieldRow>
+        <FieldRow label="Phone number">{phoneNumber ?? <NotProvided />}</FieldRow>
+        <FieldRow label="Address">{address?.trim() ? address : <NotProvided />}</FieldRow>
 
         {/* Personal */}
         <SectionTitle>Personal</SectionTitle>
-        <FieldRow label="Date of birth">
-          {(enrollment.student as { dateOfBirth?: string | null } | undefined)?.dateOfBirth ?? <NotProvided />}
-        </FieldRow>
+        <FieldRow label="Date of birth">{dateOfBirth ?? <NotProvided />}</FieldRow>
         <FieldRow label="Gender">
-          {(enrollment.student as { gender?: string | null } | undefined)?.gender ?? <NotProvided />}
+          {gender ? gender.charAt(0).toUpperCase() + gender.slice(1) : <NotProvided />}
         </FieldRow>
-        <FieldRow label="Qualification">
-          {(enrollment.student as { qualificationTitle?: string | null } | undefined)?.qualificationTitle ?? <NotProvided />}
-        </FieldRow>
+        <FieldRow label="Qualification">{qualificationTitleFallback ?? <NotProvided />}</FieldRow>
 
-        {/* Qualifications — list of student's qualifications with attachments. */}
+        {/* Qualifications — clickable PDF badges when fileUrl is set. */}
         <SectionTitle>Qualifications</SectionTitle>
         {filledQuals.length === 0 ? (
           <div style={{ fontFamily: "var(--font-body)", fontSize: 13, color: "var(--color-muted)", fontStyle: "italic", paddingBottom: 8 }}>
@@ -225,42 +268,83 @@ export function EnrollmentProfileDialog({ enrollment, onClose, onApprove, onReje
           </div>
         ) : (
           <div style={{ border: "1px solid var(--color-stroke)", borderRadius: 10, overflow: "hidden", marginBottom: 8 }}>
-            {filledQuals.map((q, i) => (
-              <div
-                key={q.id}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "40px 1fr auto",
-                  gap: 10,
-                  alignItems: "center",
-                  padding: "10px 12px",
-                  fontFamily: "var(--font-body)",
-                  fontSize: 13,
-                  borderBottom: i < filledQuals.length - 1 ? "1px solid var(--color-stroke-2)" : 0,
-                }}
-              >
-                <span style={{ color: "var(--color-muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                  {i + 1}.
-                </span>
-                <span style={{ color: "var(--color-primary)", fontWeight: 600 }}>{q.title}</span>
-                <span
+            {filledQuals.map((q, i) => {
+              const hasFile = !!q.fileUrl;
+              const displayName = hasFile
+                ? (() => {
+                    try {
+                      const last = q.fileUrl!.split("/").pop() ?? "";
+                      const decoded = decodeURIComponent(last.split("?")[0]);
+                      return decoded.replace(/^q-[a-z0-9]+-[a-z0-9]+-?/i, "") || decoded;
+                    } catch {
+                      return "View PDF";
+                    }
+                  })()
+                : "no attachment";
+              return (
+                <div
+                  key={q.id}
                   style={{
-                    display: "inline-flex",
+                    display: "grid",
+                    gridTemplateColumns: "40px 1fr auto",
+                    gap: 10,
                     alignItems: "center",
-                    gap: 6,
-                    padding: "4px 10px",
-                    borderRadius: 9999,
-                    background: q.attachmentName ? "rgba(188,233,85,0.12)" : "var(--color-stroke-2)",
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 11,
-                    color: q.attachmentName ? "var(--color-primary)" : "var(--color-muted)",
+                    padding: "10px 12px",
+                    fontFamily: "var(--font-body)",
+                    fontSize: 13,
+                    borderBottom: i < filledQuals.length - 1 ? "1px solid var(--color-stroke-2)" : 0,
                   }}
                 >
-                  <Icon name="file-text" size={12} />
-                  {q.attachmentName ?? "no attachment"}
-                </span>
-              </div>
-            ))}
+                  <span style={{ color: "var(--color-muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
+                    {i + 1}.
+                  </span>
+                  <span style={{ color: "var(--color-primary)", fontWeight: 600 }}>{q.title}</span>
+                  {hasFile ? (
+                    <a
+                      href={q.fileUrl ?? "#"}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Open PDF in new tab"
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "4px 10px",
+                        borderRadius: 9999,
+                        background: "rgba(188,233,85,0.18)",
+                        border: "1px solid rgba(188,233,85,0.5)",
+                        fontFamily: "var(--font-body)",
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: "var(--color-primary)",
+                        textDecoration: "none",
+                      }}
+                    >
+                      <Icon name="file-text" size={12} />
+                      {displayName}
+                      <Icon name="external-link" size={10} style={{ opacity: 0.7 }} />
+                    </a>
+                  ) : (
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "4px 10px",
+                        borderRadius: 9999,
+                        background: "var(--color-stroke-2)",
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 11,
+                        color: "var(--color-muted)",
+                      }}
+                    >
+                      <Icon name="file-text" size={12} />
+                      {displayName}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 
