@@ -161,22 +161,42 @@ export default function AdminStudentDetailPage() {
     }
   };
 
-  // Delete — UI-only stub. The backend endpoint (DELETE /users/:uid) is not
-  // implemented yet; this toasts so the operator sees the intent confirmed
-  // and the audit timeline (when wired) can pick it up later.
+  // DELETE /users/:uid (V2 spec §4.9) — soft-deletes the Firestore record
+  // and disables the Firebase Auth account. Backend rejects with 403 when
+  // the caller is the target, or when the target is admin/super_admin
+  // (those go through DELETE /super-admin/admins/:uid instead).
   const handleDelete = async () => {
     if (!student) return;
     setActionBusy(true);
-    await new Promise((r) => setTimeout(r, 200));
-    dispatch(
-      pushToast({
-        tone: "warning",
-        title: "Delete pending backend",
-        message: `${student.firstName} ${student.lastName} would be deleted (UI only — DELETE /users/:uid not implemented).`,
-      }),
-    );
-    setActionBusy(false);
-    setConfirmAction(null);
+    try {
+      await apiRequest(`/users/${student.uid}`, { method: "DELETE" });
+      dispatch(
+        pushToast({
+          tone: "success",
+          title: "User deleted",
+          message: `${student.firstName} ${student.lastName} can no longer sign in.`,
+        }),
+      );
+      router.replace(`${base}/students`);
+    } catch (err) {
+      let title = "Couldn't delete user";
+      let message: string | undefined;
+      if (err instanceof ApiRequestError) {
+        if (err.status === 403) {
+          title = "Not permitted";
+          message = err.message; // backend message already explains why
+        } else if (err.status === 404) {
+          title = "User not found";
+          message = "They may have already been deleted.";
+        } else {
+          message = err.message;
+        }
+      }
+      dispatch(pushToast({ tone: "warning", title, message }));
+    } finally {
+      setActionBusy(false);
+      setConfirmAction(null);
+    }
   };
 
   // Demote — strip leader or g12 from the user. UI only; the role mutation
@@ -245,6 +265,12 @@ export default function AdminStudentDetailPage() {
   const hasLeader = studentRoles.includes("leader");
   const hasG12 = studentRoles.includes("g12");
   const canDemote = hasLeader || hasG12;
+  // Spec §4.9: backend rejects DELETE /users/:uid when caller === target,
+  // or when target holds admin / super_admin. Hide the button in those
+  // cases rather than letting the click fail.
+  const isSelf = student.uid === sessionUser?.uid;
+  const targetIsAdmin = studentRoles.includes("admin") || studentRoles.includes("super_admin");
+  const canDelete = !isSelf && !targetIsAdmin;
   // Demote target priority — if the user holds both, default to stripping G12
   // first (the higher privilege). Admins can re-open the page to demote
   // further.
@@ -291,15 +317,17 @@ export default function AdminStudentDetailPage() {
               {actionBusy ? "Suspending…" : "Suspend"}
             </Button>
           )}
-          <Button
-            variant="secondary"
-            icon="trash-2"
-            onClick={() => setConfirmAction("delete")}
-            disabled={actionBusy}
-            style={{ color: "var(--color-error)", borderColor: "var(--color-error)" }}
-          >
-            Delete
-          </Button>
+          {canDelete && (
+            <Button
+              variant="secondary"
+              icon="trash-2"
+              onClick={() => setConfirmAction("delete")}
+              disabled={actionBusy}
+              style={{ color: "var(--color-error)", borderColor: "var(--color-error)" }}
+            >
+              {actionBusy && confirmAction === "delete" ? "Deleting…" : "Delete"}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -405,7 +433,7 @@ export default function AdminStudentDetailPage() {
           confirmAction === "suspend"
             ? "They will be signed out immediately and won't be able to log in until reactivated. Their enrollments and progress are preserved."
             : confirmAction === "delete"
-              ? "This will permanently remove the user account, enrollments and progress once the backend endpoint is wired. UI only for now."
+              ? "This soft-deletes the account and disables their Firebase sign-in. They can no longer log in. The record is preserved for audit purposes."
               : "They will be able to sign in again and resume their courses."
         }
         confirmLabel={

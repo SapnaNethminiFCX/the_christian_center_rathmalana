@@ -88,6 +88,7 @@ export const G12_NAV: NavItem[] = [
   { id: "cells",         labelKey: "cells",          ico: "users",            href: "/cells" },
   { id: "network",       labelKey: "leadersNetwork", ico: "share-2",          href: "/g12/network" },
   { id: "promote",       labelKey: "promote",        ico: "user-plus",        href: "/g12/promote" },
+  { id: "reports",       labelKey: "reports",        ico: "file-text",        href: "/g12/reports" },
   { id: "analytics",     labelKey: "analytics",      ico: "bar-chart",        href: "/g12/analytics" },
   { id: "school",        labelKey: "bibleSchool",    ico: "book-open",        href: "/school" },
   { group: "Account" },

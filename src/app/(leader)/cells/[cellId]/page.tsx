@@ -27,8 +27,21 @@ export default function LeaderCellDetailPage() {
   const { busy: memberBusy, addMembers, removeMember } = useCellMembers(cellId || undefined);
 
   const user = useAppSelector((s) => s.session.user);
-  const canFile = (user?.roles?.includes("leader") || user?.roles?.includes("g12") || user?.roles?.includes("super_admin")) ?? false;
-  const canDelete = canDeleteCell(cell, user);
+
+  // G12 viewing a cell they only SUPERVISE (not lead) → read-only.
+  // They can see members + reports but cannot edit / delete / add / remove
+  // / file new reports. The cell's own leader still gets full access; admin
+  // and super_admin always get full access regardless.
+  const isAdmin = !!(user?.roles?.includes("admin") || user?.roles?.includes("super_admin"));
+  const isCellLeader = !!cell && cell.leaderUid === user?.uid;
+  const isSupervisorOnly =
+    !!cell && !isAdmin && !isCellLeader && cell.g12LeaderUid === user?.uid;
+
+  const canFile =
+    !isSupervisorOnly &&
+    ((user?.roles?.includes("leader") || user?.roles?.includes("g12") || user?.roles?.includes("super_admin")) ?? false);
+  const canEdit = !isSupervisorOnly;
+  const canDelete = !isSupervisorOnly && canDeleteCell(cell, user);
   const { deleteCell: deleteCellApi } = useCellMutations();
   const [deleting, setDeleting] = useState(false);
 
@@ -91,9 +104,11 @@ export default function LeaderCellDetailPage() {
                 Cell report
               </Button>
             )}
-            <Button size="lg" variant="secondary-light" icon="edit-3" onClick={() => router.push(`/cells/${cell.id}/edit`)}>
-              Edit cell
-            </Button>
+            {canEdit && (
+              <Button size="lg" variant="secondary-light" icon="edit-3" onClick={() => router.push(`/cells/${cell.id}/edit`)}>
+                Edit cell
+              </Button>
+            )}
             {canDelete && (
               <Button
                 size="lg"
@@ -126,7 +141,7 @@ export default function LeaderCellDetailPage() {
             roles: typeof m === "string" ? [] : ((m as { roles?: string[] }).roles ?? []),
           }))}
           leaderUid={cell.leaderUid}
-          canEdit={canFile}
+          canEdit={canEdit && canFile}
           busy={memberBusy}
           onAddClick={() => setAddOpen(true)}
           onRemove={(uid) => {

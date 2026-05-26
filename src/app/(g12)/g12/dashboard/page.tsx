@@ -12,6 +12,7 @@ import {
   useAttendance,
 } from "@/application/hooks/useAnalytics";
 import { useReportAggregates } from "@/application/hooks/useReportAggregates";
+import { useAppSelector } from "@/application/hooks/useAppSelector";
 
 const TYPE_COLORS: Record<string, string> = {
   care: "#1D4ED8",
@@ -33,30 +34,37 @@ function weekLabel(w: unknown): string {
  *   - /analytics/meeting-types → by-cell-type donut
  */
 export default function G12DashboardPage() {
-  // Per V2 spec §13.1, calling GET /cells without a scope param auto-applies
-  // the G12 network scope server-side — that's the source of truth for
-  // "cells in my network". Avoids the prior approach of fetching org-wide
-  // and filtering on g12LeaderUid (fragile if backend doesn't populate it).
+  // Per V2 spec §13.1, GET /cells without a scope param auto-applies the
+  // G12 network scope (cells they lead + cells where they're g12LeaderUid).
+  // The dashboard charts and KPIs below derive from `myLedCells` — the
+  // subset they personally lead — since "Cells in network" already counts
+  // the wider supervised set and the user asked the charts to track only
+  // their own cells.
   const { cells: networkCells, loading: cellsLoading } = useCells({ state: "active" });
+  const currentUid = useAppSelector((s) => s.session.user?.uid);
   const cellsWeekly = useCellsWeekly({ weeks: 8 });
   const attendance = useAttendance();
 
-  const aggregates = useReportAggregates(networkCells, { weeks: 8 });
+  const myLedCells = useMemo(() => {
+    if (!currentUid) return [];
+    return networkCells.filter((c) => !!c.leaderUid && c.leaderUid === currentUid);
+  }, [networkCells, currentUid]);
 
+  const aggregates = useReportAggregates(myLedCells, { weeks: 8 });
+
+  // KPIs: "leaders in network" counts unique leaders the G12 oversees
+  // (including themselves), but "cells" and "reports" track just led cells.
   const leadersInNetwork = useMemo(
     () => new Set(networkCells.map((c) => c.leaderUid).filter(Boolean)).size,
     [networkCells],
   );
-  const cellsInNetwork = networkCells.length;
+  const cellsILead = myLedCells.length;
 
-  // Total reports filed across the network — sourced from each cell's
-  // `reportCount` field (populated by the backend on /cells). Falls back to
-  // the analytics endpoint if cells haven't loaded yet.
   const totalReports = useMemo(() => {
-    const fromCells = networkCells.reduce((s, c) => s + (c.reportCount ?? 0), 0);
+    const fromCells = myLedCells.reduce((s, c) => s + (c.reportCount ?? 0), 0);
     if (fromCells > 0) return fromCells;
     return (Array.isArray(cellsWeekly.data) ? cellsWeekly.data : []).reduce((s, p) => s + (p?.reports ?? 0), 0);
-  }, [networkCells, cellsWeekly.data]);
+  }, [myLedCells, cellsWeekly.data]);
 
   const weeklyBars = useMemo(() => {
     const fromApi = Array.isArray(attendance.data) ? attendance.data : [];
@@ -70,19 +78,16 @@ export default function G12DashboardPage() {
     }
     // Per-cell fallback so a G12 with cells but no attendance recorded still
     // sees something meaningful in the bar chart.
-    return networkCells.map((c) => ({
+    return myLedCells.map((c) => ({
       label: c.name.length > 10 ? `${c.name.slice(0, 9)}…` : c.name,
       value: c.memberCount ?? 0,
     }));
-  }, [attendance.data, aggregates.weekly, networkCells]);
+  }, [attendance.data, aggregates.weekly, myLedCells]);
 
-  // Count cells in the network by type so the donut matches "Cells in network"
-  // KPI even before any reports are filed. Backend `/analytics/meeting-types`
-  // is reports-by-type, which under-represents fresh cells; reserve it for
-  // post-launch when reporting data is dense.
+  // Count led cells by type — donut should match "Cells I lead" KPI.
   const typeSlices = useMemo(() => {
     const typeMap = new Map<string, number>();
-    for (const c of networkCells) {
+    for (const c of myLedCells) {
       const t = c.type ?? "unknown";
       typeMap.set(t, (typeMap.get(t) ?? 0) + 1);
     }
@@ -91,7 +96,7 @@ export default function G12DashboardPage() {
       value: count,
       color: TYPE_COLORS[type] ?? "#999",
     }));
-  }, [networkCells]);
+  }, [myLedCells]);
 
   return (
     <div className="page">
@@ -116,21 +121,21 @@ export default function G12DashboardPage() {
           sub="Unique leaders"
         />
         <KpiMini
-          label="Cells in network"
-          value={cellsLoading ? "…" : cellsInNetwork}
-          sub={cellsInNetwork === 0 ? "no cells yet" : "in your scope"}
+          label="Cells I lead"
+          value={cellsLoading ? "…" : cellsILead}
+          sub={cellsILead === 0 ? "no cells yet" : "directly led"}
         />
         <KpiMini
           label="Total reports"
           value={cellsLoading ? "…" : totalReports}
-          sub="Across your network"
+          sub="Across cells you lead"
         />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 14 }}>
         <ChartCard
           title="Weekly attendance"
-          sub="Past 8 weeks · all your network cells combined"
+          sub="Past 8 weeks · cells you lead"
         >
           {(attendance.loading || aggregates.loading) && weeklyBars.length === 0 ? <EmptyChart message="Loading…" /> :
             weeklyBars.length === 0 ? <EmptyChart /> :
@@ -139,7 +144,7 @@ export default function G12DashboardPage() {
 
         <ChartCard
           title="By cell type"
-          sub="Distribution of your network"
+          sub="Distribution of cells you lead"
           legend={typeSlices.map((s) => ({ label: s.label, color: s.color }))}
         >
           {cellsLoading && typeSlices.length === 0 ? <EmptyChart message="Loading…" /> :

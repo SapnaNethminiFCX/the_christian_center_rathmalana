@@ -33,14 +33,16 @@ export default function LeaderCellsPage() {
   // Per V2 spec §13.1, GET /cells auto-scopes by role:
   //   - Leader → cells they lead
   //   - G12    → cells in their network (their cells + cells under them)
-  // We use TWO fetches so the network split is the backend's source of
-  // truth (rather than relying on g12LeaderUid being populated on every row
-  // of an org-wide response):
-  //   1. `scope=mine` (or no scope, since backend auto-applies) → network
-  //   2. `scope=org`  → everything; "Other cells" = org minus network.
-  // For non-G12 leaders we skip the org request — they only need "mine".
+  // Two fetches when the caller is a G12, so the network split is the
+  // backend's source of truth (rather than relying on g12LeaderUid being
+  // populated on every row of an org-wide response):
+  //   1. `scope=mine` (or no scope) → network
+  //   2. `scope=org`                → everything; "Other cells" = org minus network.
+  // Non-G12 Leaders skip the org request — backend ignores `scope=org` from
+  // a Leader caller, so the request would return the same auto-scoped set
+  // as the network fetch and the "Other cells" tab can never populate.
   const network = useCells({ state: "active" });
-  const org = useCells({ state: "active", scope: "org" });
+  const org = useCells(isG12 ? { state: "active", scope: "org" } : undefined);
   const loading = network.loading || (isG12 && org.loading);
 
   const applyFilters = (list: Cell[]) => list.filter((c) => {
@@ -51,26 +53,39 @@ export default function LeaderCellsPage() {
 
   // ── Three buckets ────────────────────────────────────────────────────
   // 1. Mine    — cells where the current user is the leader (full access).
-  // 2. UnderMe — G12 only: cells in their network where they are NOT the
-  //              direct leader. Backend network-scope already excludes
-  //              outside cells, so just remove "mine" from `network`.
-  // 3. Other   — org list minus everything in the network.
+  // 2. UnderMe — G12 only: cells whose g12LeaderUid is the current user AND
+  //              they're NOT also the leader. Explicit g12LeaderUid match
+  //              (rather than "any network cell that's not mine") because
+  //              the backend's network auto-scope can return a broader set
+  //              than just direct supervision in some cases.
+  // 3. Other   — every other active cell: in the org list but NOT in
+  //              {mine ∪ underMe}.
   const networkFiltered = useMemo(() => applyFilters(network.cells), [network.cells, typeFilter, search]);
   const orgFiltered = useMemo(() => applyFilters(org.cells), [org.cells, typeFilter, search]);
 
-  const myCells: Cell[]      = networkFiltered.filter((c) => c.leaderUid === user?.uid);
-  const underMeCells: Cell[] = isG12
-    ? networkFiltered.filter((c) => c.leaderUid !== user?.uid)
+  const myCells: Cell[]      = user?.uid
+    ? networkFiltered.filter((c) => c.leaderUid === user.uid)
     : [];
-  const networkIds = new Set(network.cells.map((c) => c.id));
-  const otherCells: Cell[]   = orgFiltered.filter((c) => !networkIds.has(c.id));
+  const underMeCells: Cell[] = isG12 && user?.uid
+    ? networkFiltered.filter((c) => c.g12LeaderUid === user.uid && c.leaderUid !== user.uid)
+    : [];
+  const accountedIds = new Set([
+    ...myCells.map((c) => c.id),
+    ...underMeCells.map((c) => c.id),
+  ]);
+  const otherCells: Cell[]   = orgFiltered.filter((c) => !accountedIds.has(c.id));
 
+  // "Other cells" is hidden for non-G12 Leaders because the backend ignores
+  // `scope=org` from a plain Leader caller (returns just the auto-scoped
+  // led-cells set), making the tab always empty for them.
   const tabs: CellTab[] = [
     { id: "mine",  label: "Cells I lead", icon: "users",      count: myCells.length },
     ...(isG12
-      ? [{ id: "underMe", label: "Leaders under me", icon: "user-check", count: underMeCells.length } satisfies CellTab]
+      ? [
+          { id: "underMe", label: "Leaders under me", icon: "user-check", count: underMeCells.length } satisfies CellTab,
+          { id: "other",   label: "Other cells",      icon: "eye",        count: otherCells.length }   satisfies CellTab,
+        ]
       : []),
-    { id: "other", label: "Other cells",  icon: "eye",        count: otherCells.length },
   ];
 
   // Falls back to "mine" if the active tab disappears (e.g. role change).
@@ -94,8 +109,7 @@ export default function LeaderCellsPage() {
                 )
                 : (
                   <>
-                    <b style={{ color: "var(--color-primary)" }}>{myCells.length}</b> cells you lead ·{" "}
-                    <b style={{ color: "var(--color-primary)" }}>{otherCells.length}</b> others available.
+                    <b style={{ color: "var(--color-primary)" }}>{myCells.length}</b> cell{myCells.length === 1 ? "" : "s"} you lead.
                   </>
                 )}
           </p>
